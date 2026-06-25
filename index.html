@@ -7,12 +7,20 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh;overflow:hidden;font-family:'Segoe UI',Arial,sans-serif}
-canvas{display:block;border:1px solid #1a1a3a;border-radius:4px;max-width:100vw;max-height:100vh;cursor:none;touch-action:none}
+#game{display:flex;align-items:center;gap:10px}
+canvas{display:block;border:1px solid #1a1a3a;border-radius:4px;max-width:calc(100vw - 160px);max-height:100vh;cursor:none;touch-action:none}
 #ui{position:absolute;color:#888;font-size:12px;top:8px;right:8px;opacity:0.5;pointer-events:none}
+.side-btn{width:60px;height:80px;display:flex;align-items:center;justify-content:center;font-size:28px;color:#fff;background:rgba(255,255,255,0.1);border:1px solid #333;border-radius:12px;cursor:pointer;touch-action:none;user-select:none;-webkit-user-select:none}
+.side-btn:active{background:rgba(255,255,255,0.25)}
+.side-group{display:flex;flex-direction:column;gap:10px}
 </style>
 </head>
 <body>
+<div id="game">
+<div class="side-group"><div class="side-btn" id="btnBoostL">⚡</div><div class="side-btn" id="btnPaddleL">C</div></div>
 <canvas id="c"></canvas>
+<div class="side-group"><div class="side-btn" id="btnBoostR">⚡</div><div class="side-btn" id="btnPaddleR">C</div></div>
+</div>
 <div id="overlay" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:800px;height:600px;pointer-events:none;display:flex;justify-content:center;align-items:center;font-family:Arial,sans-serif;touch-action:none">
   <div id="gameover" style="display:none;pointer-events:auto;text-align:center">
     <div style="color:#f44;font-size:56px;margin-bottom:10px">GAME OVER</div>
@@ -544,18 +552,6 @@ function handleSettingsInput(){
 function handleInput(state){
   const sp=input.spacePressed,ms=input.mousePressed||input.touches.length>0
 
-  // Mobile buttons + lock toggle
-  if(ms){
-    const mx=input.mouseX,my=input.mouseY
-    if(my>H-40&&my<H-5&&mx>350&&mx<450&&!showLevelSelect){mbLocked=!mbLocked}
-    else if(mbLocked&&!state.paused&&!showLevelSelect&&state.status!==GameStatus.GameOver&&state.status!==GameStatus.LevelComplete){
-      handleMobileButtons(ms,mx,my)
-    }else if(!mbLocked&&input.touches.length>0){
-      handleMobileButtons(ms,mx,my)
-    }
-  }
-  if(!mbLocked&&input.touches.length===0&&input.mousePressed===false)mbDrag=-1
-
   if(input.keys['CtrlL']){showLevelSelect=!showLevelSelect;input.keys['CtrlL']=false;if(showLevelSelect)state.paused=true}
 
   if(showLevelSelect){
@@ -663,61 +659,7 @@ function handleInput(state){
   return state
 }
 
-// ===== MOBILE BUTTONS =====
-let mbLocked=true
-const mbButtons=[
-  {id:'left',label:'◀',x:30,y:470,w:60,h:60,action:()=>{input.touchLeft=true}},
-  {id:'right',label:'▶',x:W-90,y:470,w:60,h:60,action:()=>{input.touchRight=true}},
-  {id:'boost',label:'⚡',x:W-90,y:390,w:60,h:60,action:()=>{input.touchZ=true}},
-  {id:'paddle',label:'C',x:30,y:390,w:60,h:60,action:()=>{input.touchC=true}}
-]
-let mbDrag=-1
 
-function handleMobileButtons(ms,mx,my){
-  if(!ms||input.touches.length===0)return
-  if(mbLocked){
-    for(let i=0;i<mbButtons.length;i++){
-      const b=mbButtons[i]
-      if(mx>b.x&&mx<b.x+b.w&&my>b.y&&my<b.y+b.h){
-        b.action();break
-      }
-    }
-    return
-  }
-  // Drag
-  if(mbDrag<0){
-    for(let i=mbButtons.length-1;i>=0;i--){
-      const b=mbButtons[i]
-      if(mx>b.x&&mx<b.x+b.w&&my>b.y&&my<b.y+b.h){mbDrag=i;break}
-    }
-  }
-  if(mbDrag>=0){
-    mbButtons[mbDrag].x=mx-30;mbButtons[mbDrag].y=my-30
-    mbButtons[mbDrag].x=clamp(mbButtons[mbDrag].x,0,W-60)
-    mbButtons[mbDrag].y=clamp(mbButtons[mbDrag].y,0,H-60)
-  }
-}
-
-function renderMobileButtons(ctx){
-  if(input.touches.length===0&&!input.mousePressed)return
-  ctx.globalAlpha=0.5
-  for(const b of mbButtons){
-    ctx.fillStyle='#333';roundRect(ctx,b.x,b.y,b.w,b.h,12);ctx.fill()
-    ctx.fillStyle='#fff';ctx.font='24px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
-    ctx.fillText(b.label,b.x+b.w/2,b.y+b.h/2)
-  }
-  if(!mbLocked&&mbDrag>=0){
-    ctx.strokeStyle='#ff0';ctx.lineWidth=2
-    const b=mbButtons[mbDrag]
-    roundRect(ctx,b.x-3,b.y-3,b.w+6,b.h+6,14);ctx.stroke()
-  }
-  ctx.globalAlpha=1
-  // Lock toggle button
-  ctx.fillStyle=mbLocked?'rgba(0,255,136,0.5)':'rgba(255,68,68,0.5)'
-  ctx.font='14px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
-  roundRect(ctx,350,H-35,100,28,6);ctx.fill()
-  ctx.fillStyle='#fff';ctx.fillText(mbLocked?'BUTTONS LOCKED':'DRAG TO MOVE',400,H-21)
-}
 
 // ===== HTML OVERLAYS =====
 const overlay=document.getElementById('overlay')
@@ -788,6 +730,18 @@ function jumpToLevel(lv){
 }
 buildLevelGrid()
 updateSettingsDisplay()
+
+// Side buttons for speed
+function bindBtn(id,flag){
+  const el=document.getElementById(id)
+  el.addEventListener('touchstart',e=>{e.preventDefault();input[flag]=true})
+  el.addEventListener('touchend',e=>{e.preventDefault();input[flag]=false})
+  el.addEventListener('mousedown',()=>{input[flag]=true})
+  el.addEventListener('mouseup',()=>{input[flag]=false})
+  el.addEventListener('mouseleave',()=>{input[flag]=false})
+}
+bindBtn('btnBoostL','touchZ');bindBtn('btnBoostR','touchZ')
+bindBtn('btnPaddleL','touchC');bindBtn('btnPaddleR','touchC')
 
 // ===== CANVAS SETUP =====
 const canvas=document.getElementById('c')
@@ -1035,7 +989,6 @@ function render(state){
     ctx.globalAlpha=1
   }
 
-  renderMobileButtons(ctx)
   ctx.restore()
 }
 
