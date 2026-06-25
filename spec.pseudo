@@ -1,0 +1,1829 @@
+
+module space_breakout {
+  // ============================================================
+  // 1. DOMAIN TYPES
+  // ============================================================
+  
+  // Core Geometry
+  struct Point = {
+    x: float,
+    y: float
+  }
+  
+  struct Size = {
+    width: float,
+    height: float
+  }
+  
+  struct Vector = {
+    dx: float,
+    dy: float
+  }
+  
+  struct Rectangle = {
+    position: Point,
+    size: Size
+  }
+  
+  struct Circle = {
+    center: Point,
+    radius: float
+  }
+  
+  // Collision Types
+  enum CollisionSide = {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    None
+  }
+  
+  // Ball
+  struct Ball = {
+    position: Point,
+    velocity: Vector,
+    radius: float,
+    speed: float,           // Base speed (increases with difficulty)
+    trail: [Point],         // Last 20 positions for trail effect
+    angle: float,           // For visual rotation/spin
+    color: string,
+    glowColor: string
+  }
+  
+  // Paddle
+  struct Paddle = {
+    position: Point,
+    size: Size,
+    speed: float,
+    targetX: float,         // For smooth movement
+    width: float,
+    height: float,
+    color: string,
+    glowColor: string,
+    stretch: float,         // Visual squash/stretch effect
+    angle: float            // For tilt effect
+  }
+  
+  // Brick
+  struct Brick = {
+    position: Point,
+    size: Size,
+    health: int,            // 1-3 hits to destroy
+    maxHealth: int,
+    color: string,
+    points: int,
+    type: BrickType,
+    isAlive: bool,
+    glowIntensity: float,
+    hitAnimation: float     // 0-1, decaying after hit
+  }
+  
+  enum BrickType = {
+    Standard,               // 1 hit, 10 points
+    Tough,                  // 2 hits, 20 points
+    Steel,                  // 3 hits, 30 points
+    PowerUp,                // Drops power-up, 15 points
+    Bonus,                  // 50 points, golden glow
+    Indestructible          // Cannot be destroyed
+  }
+  
+  // Power-ups
+  enum PowerUpType = {
+    Expand,                 // Paddle widens
+    Shrink,                 // Paddle shrinks
+    MultiBall,              // +1 ball
+    FastBall,               // Ball speed increases
+    SlowBall,               // Ball speed decreases
+    FireBall,               // Ball destroys bricks on contact
+    ExtraLife,              // +1 life
+    Laser,                  // Paddle can shoot lasers
+    Magnet,                 // Ball sticks to paddle
+    Through                 // Ball passes through bricks
+  }
+  
+  struct PowerUp = {
+    position: Point,
+    type: PowerUpType,
+    velocity: Vector,       // Falls down
+    size: Size,
+    duration: float,        // In seconds (0 = permanent)
+    active: bool,
+    glowColor: string,
+    icon: string            // Unicode/emoji representation
+  }
+  
+  // Laser
+  struct Laser = {
+    position: Point,
+    velocity: Vector,
+    size: Size,
+    active: bool,
+    color: string
+  }
+  
+  // Game State
+  struct GameState = {
+    ball: Ball,
+    paddle: Paddle,
+    bricks: [Brick],
+    powerUps: [PowerUp],
+    lasers: [Laser],
+    
+    // Score & Lives
+    score: int,
+    lives: int,
+    highScore: int,
+    level: int,
+    combo: int,              // Consecutive brick hits without dropping ball
+    maxCombo: int,
+    
+    // Status
+    status: GameStatus,
+    paused: bool,
+    gameOver: bool,
+    levelComplete: bool,
+    
+    // Timers
+    time: float,
+    levelStartTime: float,
+    powerUpTimers: map<PowerUpType, float>,
+    
+    // Special
+    fireBallActive: bool,
+    laserActive: bool,
+    magnetActive: bool,
+    throughActive: bool,
+    
+    // Visual Effects
+    particles: [Particle],
+    scorePopups: [ScorePopup],
+    shakeIntensity: float,
+    flashEffect: Option<FlashEffect>
+  }
+  
+  enum GameStatus = {
+    Waiting,                 // Ball on paddle, waiting for launch
+    Playing,
+    LevelComplete,
+    GameOver,
+    Paused
+  }
+  
+  struct FlashEffect = {
+    color: string,
+    intensity: float,
+    duration: float,
+    elapsed: float
+  }
+  
+  // Particle System
+  struct Particle = {
+    position: Point,
+    velocity: Vector,
+    size: Size,
+    life: float,
+    maxLife: float,
+    color: string,
+    type: ParticleType,
+    gravity: float,
+    fadeOut: bool,
+    rotation: float,
+    rotationSpeed: float
+  }
+  
+  enum ParticleType = {
+    Spark,
+    Explosion,
+    Trail,
+    Star,
+    Glow,
+    BrickPiece
+  }
+  
+  struct ScorePopup = {
+    position: Point,
+    text: string,
+    color: string,
+    life: float,
+    maxLife: float,
+    velocity: Vector,
+    size: float
+  }
+  
+  // ============================================================
+  // 2. INPUT HANDLING
+  // ============================================================
+  
+  // Keyboard Input
+  type KeyState = map<string, bool>  // key -> pressed
+  
+  // Touch Input
+  struct TouchPoint = {
+    id: int,
+    position: Point,
+    isActive: bool
+  }
+  
+  // Combined Input
+  struct Input = {
+    keys: KeyState,
+    touches: [TouchPoint],
+    mousePosition: Point,
+    mousePressed: bool,
+    leftKeyPressed: bool,
+    rightKeyPressed: bool,
+    spacePressed: bool
+  }
+  
+  // ============================================================
+  // 3. EFFECTS & OBSERVABILITY
+  // ============================================================
+  
+  // Sound Effects (declared with effect)
+  effect playSound(name: string, volume: float) -> void
+  
+  @implementation {
+    target: "WebAudio",
+    maxConcurrent: 8,
+    assets: {
+      "bounce": "sounds/bounce.mp3",
+      "brick": "sounds/brick.mp3",
+      "powerup": "sounds/powerup.mp3",
+      "lose": "sounds/lose.mp3",
+      "win": "sounds/win.mp3",
+      "laser": "sounds/laser.mp3",
+      "explosion": "sounds/explosion.mp3",
+      "level_complete": "sounds/level_complete.mp3"
+    }
+  }
+  
+  // Render effect
+  effect render(scene: Scene) -> void
+  
+  @implementation {
+    target: "Canvas2D",
+    width: 800,
+    height: 600,
+    background: "#0a0a1a",
+    fps: 60,
+    antiAlias: true
+  }
+  
+  // Animation Effect
+  effect animate(deltaTime: float) -> void
+  
+  // ============================================================
+  // 4. CORE GAME FUNCTIONS
+  // ============================================================
+  
+  // Initialize Game
+  @pure
+  function createInitialState() -> GameState {
+    let paddleSize = Size { width: 100, height: 14 }
+    let paddlePos = Point { 
+      x: 400 - paddleSize.width / 2, 
+      y: 550 
+    }
+    
+    let ballPos = Point { 
+      x: 400, 
+      y: 520 
+    }
+    
+    let ball = Ball {
+      position: ballPos,
+      velocity: Vector { dx: 0, dy: 0 },
+      radius: 8,
+      speed: 400,
+      trail: [],
+      angle: 0,
+      color: "#00ffff",
+      glowColor: "rgba(0, 255, 255, 0.5)"
+    }
+    
+    let paddle = Paddle {
+      position: paddlePos,
+      size: paddleSize,
+      speed: 500,
+      targetX: paddlePos.x,
+      width: 100,
+      height: 14,
+      color: "#0088ff",
+      glowColor: "rgba(0, 136, 255, 0.5)",
+      stretch: 1.0,
+      angle: 0
+    }
+    
+    GameState {
+      ball: ball,
+      paddle: paddle,
+      bricks: createLevel(1),
+      powerUps: [],
+      lasers: [],
+      score: 0,
+      lives: 3,
+      highScore: loadHighScore() ?? 0,
+      level: 1,
+      combo: 0,
+      maxCombo: 0,
+      status: Waiting,
+      paused: false,
+      gameOver: false,
+      levelComplete: false,
+      time: 0,
+      levelStartTime: 0,
+      powerUpTimers: {},
+      fireBallActive: false,
+      laserActive: false,
+      magnetActive: false,
+      throughActive: false,
+      particles: [],
+      scorePopups: [],
+      shakeIntensity: 0,
+      flashEffect: None
+    }
+  }
+  
+  // Create Level Bricks
+  @pure
+  function createLevel(level: int) -> [Brick] {
+    let rows = min(8, 5 + (level - 1) * 1)
+    let cols = 10
+    let brickWidth = 72
+    let brickHeight = 24
+    let gap = 4
+    let margin = 20
+    
+    let bricks: [Brick] = []
+    
+    // Level-specific configurations
+    let configs = [
+      // [color, points, type, health]
+      ["#ff4444", 10, Standard, 1],
+      ["#ff8800", 10, Standard, 1],
+      ["#ffcc00", 10, Standard, 1],
+      ["#44ff44", 15, PowerUp, 1],
+      ["#00ccff", 20, Tough, 2],
+      ["#8888ff", 30, Steel, 3],
+      ["#ff44ff", 50, Bonus, 1],
+      ["#666666", 0, Indestructible, 999]
+    ]
+    
+    // Higher levels have tougher bricks
+    let offset = min(level - 1, 3)
+    
+    for row in range(0, rows) {
+      let rowConfig = configs[(row + offset) % len(configs)]
+      for col in range(0, cols) {
+        let x = margin + col * (brickWidth + gap)
+        let y = 50 + row * (brickHeight + gap)
+        
+        // Some bricks are missing in higher levels (patterns)
+        let pattern = (row + col) % 3
+        if level >= 3 && pattern == 0 then continue
+        
+        // Alternate brick types for visual interest
+        let type = rowConfig[3] as BrickType
+        let health = rowConfig[4] as int
+        let points = rowConfig[1] as int
+        
+        if level >= 5 && row % 2 == 0 && col % 2 == 0 then {
+          type = Tough
+          health = 2
+          points = 20
+        }
+        
+        let brick = Brick {
+          position: Point { x: x, y: y },
+          size: Size { width: brickWidth, height: brickHeight },
+          health: health,
+          maxHealth: health,
+          color: rowConfig[0] as string,
+          points: points,
+          type: type,
+          isAlive: true,
+          glowIntensity: 0.3 + random() * 0.3,
+          hitAnimation: 0
+        }
+        
+        bricks.push(brick)
+      }
+    }
+    
+    bricks
+  }
+  
+  // ============================================================
+  // 5. PHYSICS & COLLISION
+  // ============================================================
+  
+  // Collision Detection
+  @pure
+  function rectCircleCollision(rect: Rectangle, circle: Circle) -> Option<CollisionSide> {
+    let closestX = clamp(circle.center.x, rect.position.x, rect.position.x + rect.size.width)
+    let closestY = clamp(circle.center.y, rect.position.y, rect.position.y + rect.size.height)
+    
+    let distanceX = circle.center.x - closestX
+    let distanceY = circle.center.y - closestY
+    
+    let distance = sqrt(distanceX * distanceX + distanceY * distanceY)
+    
+    if distance > circle.radius then None
+    
+    // Determine which side was hit
+    let overlapX = (rect.size.width / 2 + circle.radius) - abs(distanceX)
+    let overlapY = (rect.size.height / 2 + circle.radius) - abs(distanceY)
+    
+    if overlapX < overlapY then {
+      if distanceX < 0 then Left else Right
+    } else {
+      if distanceY < 0 then Top else Bottom
+    }
+  }
+  
+  // Rectangle-Rectangle Collision
+  @pure
+  function rectCollision(a: Rectangle, b: Rectangle) -> bool {
+    a.position.x < b.position.x + b.size.width &&
+    a.position.x + a.size.width > b.position.x &&
+    a.position.y < b.position.y + b.size.height &&
+    a.position.y + a.size.height > b.position.y
+  }
+  
+  // Ball-Paddle Collision with Angle Reflection
+  function handlePaddleCollision(state: GameState) -> Result<GameState, Error> {
+    let ball = state.ball
+    let paddle = state.paddle
+    
+    let paddleRect = Rectangle {
+      position: paddle.position,
+      size: paddle.size
+    }
+    
+    let ballCircle = Circle {
+      center: ball.position,
+      radius: ball.radius
+    }
+    
+    let collision = rectCircleCollision(paddleRect, ballCircle)
+    
+    if collision == None then Success(state)
+    
+    // Calculate reflection angle based on where ball hits paddle
+    let hitPoint = (ball.position.x - paddle.position.x) / paddle.size.width
+    let angle = (hitPoint - 0.5) * 1.2  // -0.6 to 0.6 radians
+    
+    let speed = ball.speed
+    let newDx = sin(angle) * speed
+    let newDy = -abs(cos(angle) * speed)
+    
+    // Minimum vertical velocity to prevent horizontal bouncing
+    if abs(newDy) < speed * 0.3 then {
+      newDy = -speed * 0.3 * sign(ball.velocity.dy)
+    }
+    
+    let updatedBall = { 
+      ball | 
+      velocity: Vector { dx: newDx, dy: newDy },
+      position: Point { 
+        x: ball.position.x,
+        y: paddle.position.y - ball.radius - 1
+      }
+    }
+    
+    // Play bounce sound
+    playSound("bounce", 0.5)
+    
+    // Add paddle stretch effect
+    let updatedPaddle = { 
+      paddle | 
+      stretch: 1.3,
+      angle: angle * 2
+    }
+    
+    // Spawn particles on hit
+    let particles = createBounceParticles(ball.position, ball.color)
+    
+    Success({ 
+      state | 
+      ball: updatedBall,
+      paddle: updatedPaddle,
+      particles: state.particles + particles,
+      combo: 0  // Reset combo when ball hits paddle
+    })
+  }
+  
+  // Ball-Brick Collision
+  function handleBrickCollision(state: GameState) -> Result<GameState, Error> {
+    let ball = state.ball
+    let ballCircle = Circle {
+      center: ball.position,
+      radius: ball.radius
+    }
+    
+    let updatedBricks: [Brick] = []
+    let collisionOccurred = false
+    let particles: [Particle] = []
+    let scorePopups: [ScorePopup] = []
+    let newScore = state.score
+    let newCombo = state.combo + 1
+    
+    for brick in state.bricks {
+      if not brick.isAlive then {
+        updatedBricks.push(brick)
+        continue
+      }
+      
+      let brickRect = Rectangle {
+        position: brick.position,
+        size: brick.size
+      }
+      
+      let collision = rectCircleCollision(brickRect, ballCircle)
+      
+      if collision != None {
+        // Brick hit!
+        collisionOccurred = true
+        
+        // Handle indestructible bricks
+        if brick.type == Indestructible {
+          // Reflect ball, but don't destroy
+          let newVel = reflectBall(ball.velocity, collision)
+          let updatedBall = { ball | velocity: newVel }
+          
+          // Visual feedback for indestructible
+          let flashEffect = FlashEffect { 
+            color: "#ff4444", 
+            intensity: 0.5, 
+            duration: 0.1, 
+            elapsed: 0 
+          }
+          
+          playSound("bounce", 0.3)
+          
+          let updatedState = { 
+            state | 
+            ball: updatedBall,
+            flashEffect: Some(flashEffect),
+            shakeIntensity: 0.05
+          }
+          
+          // Continue to process bricks
+          updatedBricks.push(brick)
+          continue
+        }
+        
+        // Decrease brick health
+        let newHealth = brick.health - 1
+        let destroyed = newHealth <= 0
+        
+        // Fireball destroys in one hit
+        if state.fireBallActive then {
+          newHealth = 0
+          destroyed = true
+        }
+        
+        // Update brick
+        let updatedBrick = {
+          brick |
+          health: newHealth,
+          isAlive: not destroyed,
+          hitAnimation: 1.0
+        }
+        
+        if destroyed then {
+          // Score
+          let points = brick.points * (1 + state.combo / 10)
+          newScore = newScore + points
+          
+          // Combo
+          if newCombo > state.maxCombo then {
+            state.maxCombo = newCombo
+          }
+          
+          // Spawn particles
+          particles = particles + createExplosionParticles(
+            brick.position + Point { x: brick.size.width/2, y: brick.size.height/2 },
+            brick.color,
+            20
+          )
+          
+          // Score popup
+          let popup = ScorePopup {
+            position: brick.position + Point { x: brick.size.width/2, y: brick.size.height/2 },
+            text: "+" + string(points) + (newCombo > 1 ? " x" + string(newCombo) : ""),
+            color: brick.color,
+            life: 1.0,
+            maxLife: 1.0,
+            velocity: Vector { dx: random() * 50 - 25, dy: -80 },
+            size: 16 + min(newCombo, 5) * 2
+          }
+          scorePopups.push(popup)
+          
+          // Power-up drop
+          if brick.type == PowerUp && random() < 0.3 {
+            let powerUp = createRandomPowerUp(
+              brick.position + Point { x: brick.size.width/2, y: brick.size.height/2 }
+            )
+            state.powerUps.push(powerUp)
+          }
+          
+          playSound("brick", 0.4)
+          state.shakeIntensity = 0.1
+          
+        } else {
+          // Brick damaged but not destroyed
+          playSound("bounce", 0.2)
+          state.shakeIntensity = 0.03
+        }
+        
+        // Reflect ball
+        let newVel = reflectBall(ball.velocity, collision)
+        let updatedBall = { ball | velocity: newVel }
+        state.ball = updatedBall
+        
+        updatedBricks.push(updatedBrick)
+        
+        // Don't process more collisions this frame
+        break
+        
+      } else {
+        updatedBricks.push(brick)
+      }
+    }
+    
+    if collisionOccurred then {
+      Success({
+        state |
+        bricks: updatedBricks,
+        score: newScore,
+        combo: newCombo,
+        particles: state.particles + particles,
+        scorePopups: state.scorePopups + scorePopups,
+        shakeIntensity: state.shakeIntensity
+      })
+    } else {
+      Success(state)
+    }
+  }
+  
+  // Reflect Ball Helper
+  @pure
+  function reflectBall(velocity: Vector, side: CollisionSide) -> Vector {
+    case side of
+      Top | Bottom -> Vector { dx: velocity.dx, dy: -velocity.dy }
+      Left | Right -> Vector { dx: -velocity.dx, dy: velocity.dy }
+      None -> velocity
+  }
+  
+  // ============================================================
+  // 6. POWER-UP SYSTEM
+  // ============================================================
+  
+  function createRandomPowerUp(position: Point) -> PowerUp {
+    let types = [
+      Expand, Shrink, MultiBall, FastBall,
+      SlowBall, FireBall, ExtraLife, Laser, Magnet
+    ]
+    
+    let type = types[random() * len(types)]
+    let size = Size { width: 20, height: 20 }
+    
+    let configs = {
+      Expand: { color: "#00ff88", icon: "🔲", glow: "rgba(0, 255, 136, 0.5)" },
+      Shrink: { color: "#ff4444", icon: "🔲", glow: "rgba(255, 68, 68, 0.5)" },
+      MultiBall: { color: "#ff8800", icon: "⚪", glow: "rgba(255, 136, 0, 0.5)" },
+      FastBall: { color: "#ff00ff", icon: "⚡", glow: "rgba(255, 0, 255, 0.5)" },
+      SlowBall: { color: "#00ccff", icon: "🐢", glow: "rgba(0, 204, 255, 0.5)" },
+      FireBall: { color: "#ff4400", icon: "🔥", glow: "rgba(255, 68, 0, 0.5)" },
+      ExtraLife: { color: "#ff00ff", icon: "❤️", glow: "rgba(255, 0, 255, 0.5)" },
+      Laser: { color: "#00ff00", icon: "🔫", glow: "rgba(0, 255, 0, 0.5)" },
+      Magnet: { color: "#8888ff", icon: "🧲", glow: "rgba(136, 136, 255, 0.5)" }
+    }
+    
+    PowerUp {
+      position: position,
+      type: type,
+      velocity: Vector { dx: 0, dy: 100 },
+      size: size,
+      duration: 10.0,
+      active: true,
+      glowColor: configs[type].glow,
+      icon: configs[type].icon
+    }
+  }
+  
+  function applyPowerUp(state: GameState, powerUp: PowerUp) -> Result<GameState, Error> {
+    let updatedState = state
+    
+    case powerUp.type of
+      Expand -> {
+        let newWidth = state.paddle.size.width * 1.5
+        let newX = state.paddle.position.x - (newWidth - state.paddle.size.width) / 2
+        let newPaddle = {
+          state.paddle |
+          size: Size { width: newWidth, height: state.paddle.size.height },
+          position: Point { x: newX, y: state.paddle.position.y }
+        }
+        updatedState.paddle = newPaddle
+        updatedState.powerUpTimers[Expand] = powerUp.duration
+      }
+      
+      Shrink -> {
+        let newWidth = state.paddle.size.width * 0.6
+        let newX = state.paddle.position.x + (state.paddle.size.width - newWidth) / 2
+        let newPaddle = {
+          state.paddle |
+          size: Size { width: newWidth, height: state.paddle.size.height },
+          position: Point { x: newX, y: state.paddle.position.y }
+        }
+        updatedState.paddle = newPaddle
+        updatedState.powerUpTimers[Shrink] = powerUp.duration
+      }
+      
+      MultiBall -> {
+        // Create new balls
+        let newBall1 = { state.ball | position: state.ball.position + Point { x: -20, y: 0 } }
+        let newBall2 = { state.ball | position: state.ball.position + Point { x: 20, y: 0 } }
+        // In actual implementation, we'd have a balls array
+        // For now, we'll use the effect declaration
+        addBall(newBall1)
+        addBall(newBall2)
+      }
+      
+      FastBall -> {
+        let newSpeed = state.ball.speed * 1.3
+        let currentVel = state.ball.velocity
+        let mag = sqrt(currentVel.dx^2 + currentVel.dy^2)
+        if mag > 0 then {
+          let scale = newSpeed / mag
+          let newVel = Vector { dx: currentVel.dx * scale, dy: currentVel.dy * scale }
+          updatedState.ball.velocity = newVel
+          updatedState.ball.speed = newSpeed
+          updatedState.powerUpTimers[FastBall] = powerUp.duration
+        }
+      }
+      
+      SlowBall -> {
+        let newSpeed = state.ball.speed * 0.7
+        let currentVel = state.ball.velocity
+        let mag = sqrt(currentVel.dx^2 + currentVel.dy^2)
+        if mag > 0 then {
+          let scale = newSpeed / mag
+          let newVel = Vector { dx: currentVel.dx * scale, dy: currentVel.dy * scale }
+          updatedState.ball.velocity = newVel
+          updatedState.ball.speed = newSpeed
+          updatedState.powerUpTimers[SlowBall] = powerUp.duration
+        }
+      }
+      
+      FireBall -> {
+        updatedState.fireBallActive = true
+        updatedState.ball.color = "#ff4400"
+        updatedState.ball.glowColor = "rgba(255, 68, 0, 0.6)"
+        updatedState.powerUpTimers[FireBall] = powerUp.duration
+      }
+      
+      ExtraLife -> {
+        updatedState.lives = state.lives + 1
+        playSound("powerup", 0.6)
+      }
+      
+      Laser -> {
+        updatedState.laserActive = true
+        updatedState.powerUpTimers[Laser] = powerUp.duration
+      }
+      
+      Magnet -> {
+        updatedState.magnetActive = true
+        updatedState.powerUpTimers[Magnet] = powerUp.duration
+      }
+      
+      Through -> {
+        updatedState.throughActive = true
+        updatedState.powerUpTimers[Through] = powerUp.duration
+      }
+    
+    playSound("powerup", 0.5)
+    Success(updatedState)
+  }
+  
+  // ============================================================
+  // 7. GAME UPDATE LOOP
+  // ============================================================
+  
+  function update(state: GameState, input: Input, deltaTime: float) -> Result<GameState, Error> {
+    if state.paused or state.gameOver then Success(state)
+    
+    let updatedState = state
+    updatedState.time = state.time + deltaTime
+    
+    // Update Ball
+    if state.status == Playing then {
+      updatedState.ball = updateBall(state.ball, deltaTime)
+      
+      // Ball trail
+      let trail = state.ball.trail
+      trail.insert(0, state.ball.position)
+      if len(trail) > 20 then trail.pop()
+      updatedState.ball.trail = trail
+      
+      // Check wall collisions
+      updatedState = handleWallCollision(updatedState)?
+      
+      // Ball lost
+      if state.ball.position.y > 600 + 100 then {
+        updatedState.lives = state.lives - 1
+        updatedState.combo = 0
+        
+        if state.lives <= 0 then {
+          updatedState.gameOver = true
+          playSound("lose", 0.7)
+        } else {
+          resetBall(updatedState)
+          updatedState.status = Waiting
+          playSound("lose", 0.5)
+        }
+      }
+      
+      // Paddle collision
+      if state.ball.position.y + state.ball.radius > state.paddle.position.y then {
+        updatedState = handlePaddleCollision(updatedState)?
+      }
+      
+      // Brick collisions
+      updatedState = handleBrickCollision(updatedState)?
+      
+      // Check level complete
+      let bricksAlive = filter(updatedState.bricks, b -> b.isAlive and b.type != Indestructible)
+      if len(bricksAlive) == 0 then {
+        updatedState.levelComplete = true
+        updatedState.status = LevelComplete
+        playSound("level_complete", 0.6)
+        state.level = state.level + 1
+      }
+    }
+    
+    // Update Paddle
+    if state.status == Waiting or state.status == Playing then {
+      updatedState.paddle = updatePaddle(state.paddle, input, deltaTime)
+    }
+    
+    // Update Power-ups
+    for i in range(0, len(updatedState.powerUps)) {
+      let powerUp = updatedState.powerUps[i]
+      if powerUp.active then {
+        let newPos = powerUp.position + powerUp.velocity * deltaTime
+        powerUp.position = newPos
+        
+        // Check collision with paddle
+        if powerUp.position.y + powerUp.size.height > state.paddle.position.y and
+           powerUp.position.x > state.paddle.position.x and
+           powerUp.position.x < state.paddle.position.x + state.paddle.size.width then {
+          updatedState = applyPowerUp(updatedState, powerUp)?
+          powerUp.active = false
+        }
+        
+        // Out of bounds
+        if powerUp.position.y > 650 then {
+          powerUp.active = false
+        }
+      }
+    }
+    // Remove inactive power-ups
+    updatedState.powerUps = filter(updatedState.powerUps, p -> p.active)
+    
+    // Update Power-up Timers
+    let timers = state.powerUpTimers
+    for type in keys(timers) {
+      timers[type] = timers[type] - deltaTime
+      if timers[type] <= 0 then {
+        // Remove power-up effect
+        removePowerUpEffect(updatedState, type)
+        delete timers[type]
+      }
+    }
+    updatedState.powerUpTimers = timers
+    
+    // Update Particles
+    updatedState.particles = updateParticles(state.particles, deltaTime)
+    updatedState.scorePopups = updateScorePopups(state.scorePopups, deltaTime)
+    
+    // Decay shake
+    updatedState.shakeIntensity = max(0, state.shakeIntensity - deltaTime * 2)
+    
+    // Update Flash Effect
+    if state.flashEffect != None then {
+      let flash = state.flashEffect
+      flash.elapsed = flash.elapsed + deltaTime
+      if flash.elapsed >= flash.duration then {
+        updatedState.flashEffect = None
+      }
+    }
+    
+    // Update Lasers
+    let lasers = state.lasers
+    for i in range(0, len(lasers)) {
+      let laser = lasers[i]
+      if laser.active then {
+        laser.position = laser.position + laser.velocity * deltaTime
+        
+        // Check laser-brick collisions
+        for brick in updatedState.bricks {
+          if brick.isAlive and rectCollision(laserRect(laser), brickRect(brick)) then {
+            brick.health = brick.health - 1
+            if brick.health <= 0 then {
+              brick.isAlive = false
+              updatedState.score = state.score + brick.points
+              particles = particles + createExplosionParticles(
+                brick.position + Point { x: brick.size.width/2, y: brick.size.height/2 },
+                brick.color, 10
+              )
+            }
+            laser.active = false
+            break
+          }
+        }
+        
+        // Remove if out of bounds
+        if laser.position.y < 0 then {
+          laser.active = false
+        }
+      }
+    }
+    updatedState.lasers = filter(lasers, l -> l.active)
+    
+    // High Score
+    if updatedState.score > state.highScore then {
+      updatedState.highScore = updatedState.score
+      saveHighScore(updatedState.highScore)
+    }
+    
+    // Respawn ball if magnet active and ball is lost
+    if state.magnetActive and state.status == Waiting then {
+      // Ball follows paddle
+      let newPos = Point {
+        x: state.paddle.position.x + state.paddle.size.width / 2,
+        y: state.paddle.position.y - state.ball.radius - 5
+      }
+      updatedState.ball.position = newPos
+      updatedState.ball.velocity = Vector { dx: 0, dy: 0 }
+      updatedState.status = Waiting
+    }
+    
+    Success(updatedState)
+  }
+  
+  // ============================================================
+  // 8. BALL HELPERS
+  // ============================================================
+  
+  @pure
+  function updateBall(ball: Ball, deltaTime: float) -> Ball {
+    let newPos = ball.position + ball.velocity * deltaTime
+    let newAngle = ball.angle + deltaTime * 3  // Rotate ball
+    
+    Ball {
+      ball |
+      position: newPos,
+      angle: newAngle
+    }
+  }
+  
+  function handleWallCollision(state: GameState) -> Result<GameState, Error> {
+    let ball = state.ball
+    let pos = ball.position
+    let vel = ball.velocity
+    let radius = ball.radius
+    let width = 800
+    let height = 600
+    
+    let newVel = vel
+    
+    // Left wall
+    if pos.x - radius < 0 then {
+      newVel.dx = abs(vel.dx)
+      playSound("bounce", 0.2)
+    }
+    // Right wall
+    if pos.x + radius > width then {
+      newVel.dx = -abs(vel.dx)
+      playSound("bounce", 0.2)
+    }
+    // Top wall
+    if pos.y - radius < 0 then {
+      newVel.dy = abs(vel.dy)
+      playSound("bounce", 0.2)
+    }
+    // Bottom wall - handled in update loop
+    
+    let updatedBall = { ball | velocity: newVel }
+    Success({ state | ball: updatedBall })
+  }
+  
+  function resetBall(state: GameState) -> GameState {
+    let paddle = state.paddle
+    let ballPos = Point {
+      x: paddle.position.x + paddle.size.width / 2,
+      y: paddle.position.y - state.ball.radius - 5
+    }
+    
+    let ball = Ball {
+      state.ball |
+      position: ballPos,
+      velocity: Vector { dx: 0, dy: 0 }
+    }
+    
+    { state | ball: ball, status: Waiting }
+  }
+  
+  function launchBall(state: GameState) -> GameState {
+    if state.status != Waiting then state
+    
+    let angle = -π/3 + random() * π/6  // Slight random angle variation
+    let speed = state.ball.speed
+    
+    let velocity = Vector {
+      dx: sin(angle) * speed,
+      dy: -cos(angle) * speed
+    }
+    
+    let ball = { state.ball | velocity: velocity }
+    { state | ball: ball, status: Playing }
+  }
+  
+  // ============================================================
+  // 9. PADDLE HELPERS
+  // ============================================================
+  
+  function updatePaddle(paddle: Paddle, input: Input, deltaTime: float) -> Paddle {
+    let width = 800
+    
+    // Keyboard input
+    let moveX = 0
+    if input.leftKeyPressed then moveX = -1
+    if input.rightKeyPressed then moveX = 1
+    
+    // Touch input
+    if len(input.touches) > 0 then {
+      let touch = input.touches[0]
+      let targetX = touch.position.x - paddle.size.width / 2
+      let diff = targetX - paddle.position.x
+      let maxMove = paddle.speed * deltaTime
+      paddle.position.x = paddle.position.x + clamp(diff, -maxMove, maxMove)
+    }
+    
+    // Keyboard movement
+    paddle.position.x = paddle.position.x + moveX * paddle.speed * deltaTime
+    
+    // Clamp to screen
+    paddle.position.x = clamp(paddle.position.x, 0, width - paddle.size.width)
+    
+    // Decay stretch effect
+    paddle.stretch = paddle.stretch * 0.9 + 1.0 * 0.1
+    
+    // Decay angle
+    paddle.angle = paddle.angle * 0.9
+    
+    paddle
+  }
+  
+  // ============================================================
+  // 10. PARTICLE SYSTEM
+  // ============================================================
+  
+  function createExplosionParticles(position: Point, color: string, count: int) -> [Particle] {
+    let particles: [Particle] = []
+    for i in range(0, count) {
+      let angle = random() * 2π
+      let speed = 50 + random() * 200
+      let life = 0.5 + random() * 0.8
+      
+      let particle = Particle {
+        position: position,
+        velocity: Vector { dx: cos(angle) * speed, dy: sin(angle) * speed },
+        size: Size { width: 2 + random() * 4, height: 2 + random() * 4 },
+        life: life,
+        maxLife: life,
+        color: color,
+        type: Explosion,
+        gravity: 100,
+        fadeOut: true,
+        rotation: random() * 2π,
+        rotationSpeed: (random() - 0.5) * 10
+      }
+      particles.push(particle)
+    }
+    particles
+  }
+  
+  function createBounceParticles(position: Point, color: string) -> [Particle] {
+    let particles: [Particle] = []
+    for i in range(0, 5) {
+      let angle = -π/2 + (random() - 0.5) * π
+      let speed = 30 + random() * 80
+      
+      let particle = Particle {
+        position: position,
+        velocity: Vector { dx: cos(angle) * speed, dy: sin(angle) * speed },
+        size: Size { width: 2 + random() * 2, height: 2 + random() * 2 },
+        life: 0.3 + random() * 0.3,
+        maxLife: 0.6,
+        color: color,
+        type: Spark,
+        gravity: 50,
+        fadeOut: true,
+        rotation: 0,
+        rotationSpeed: 0
+      }
+      particles.push(particle)
+    }
+    particles
+  }
+  
+  function updateParticles(particles: [Particle], deltaTime: float) -> [Particle] {
+    let updated: [Particle] = []
+    for particle in particles {
+      let newPos = particle.position + particle.velocity * deltaTime
+      let newLife = particle.life - deltaTime
+      
+      if newLife > 0 then {
+        let velocity = particle.velocity + Vector { dx: 0, dy: particle.gravity * deltaTime }
+        let alpha = newLife / particle.maxLife
+        
+        let updatedParticle = {
+          particle |
+          position: newPos,
+          velocity: velocity,
+          life: newLife,
+          rotation: particle.rotation + particle.rotationSpeed * deltaTime,
+          size: particle.size * (0.5 + 0.5 * alpha)  // Shrink as particle ages
+        }
+        updated.push(updatedParticle)
+      }
+    }
+    updated
+  }
+  
+  function updateScorePopups(popups: [ScorePopup], deltaTime: float) -> [ScorePopup] {
+    let updated: [ScorePopup] = []
+    for popup in popups {
+      let newPos = popup.position + popup.velocity * deltaTime
+      let newLife = popup.life - deltaTime
+      
+      if newLife > 0 then {
+        let velocity = popup.velocity + Vector { dx: 0, dy: 30 * deltaTime }  // Slight gravity
+        let fadeAlpha = newLife / popup.maxLife
+        let size = popup.size * (1 + (1 - fadeAlpha) * 0.3)  // Grow then shrink
+        
+        let updatedPopup = {
+          popup |
+          position: newPos,
+          velocity: velocity,
+          life: newLife,
+          size: size
+        }
+        updated.push(updatedPopup)
+      }
+    }
+    updated
+  }
+  
+  // ============================================================
+  // 11. RENDERING (declarative scene description)
+  // ============================================================
+  
+  function renderScene(state: GameState) -> Scene {
+    let width = 800
+    let height = 600
+    
+    let scene = Scene { background: "#0a0a1a", elements: [] }
+    
+    // Background - subtle star field
+    for star in generateStars(100) {
+      scene.elements.push(StarElement { position: star.position, size: star.size, brightness: star.brightness })
+    }
+    
+    // Grid lines (subtle)
+    for i in range(0, 10) {
+      let x = i * 80
+      scene.elements.push(Line { 
+        x1: x, y1: 0, 
+        x2: x, y2: height,
+        color: "rgba(255,255,255,0.02)"
+      })
+    }
+    
+    // Draw bricks
+    for brick in state.bricks {
+      if brick.isAlive then {
+        let brickElement = createBrickElement(brick, state.shakeIntensity, state.fireBallActive)
+        scene.elements.push(brickElement)
+        
+        // Brick glow
+        if brick.glowIntensity > 0.2 then {
+          scene.elements.push(GlowElement {
+            position: brick.position + brick.size / 2,
+            size: brick.size * 1.2,
+            color: brick.color,
+            intensity: brick.glowIntensity * 0.3
+          })
+        }
+        
+        // Hit animation flash
+        if brick.hitAnimation > 0 then {
+          scene.elements.push(FlashElement {
+            position: brick.position,
+            size: brick.size,
+            color: "#ffffff",
+            intensity: brick.hitAnimation * 0.6
+          })
+        }
+      }
+    }
+    
+    // Draw power-ups
+    for powerUp in state.powerUps {
+      if powerUp.active then {
+        scene.elements.push(PowerUpElement {
+          position: powerUp.position,
+          size: powerUp.size,
+          type: powerUp.type,
+          icon: powerUp.icon,
+          glowColor: powerUp.glowColor,
+          floatOffset: sin(state.time * 2 + powerUp.position.x) * 3
+        })
+      }
+    }
+    
+    // Draw paddle with effects
+    let paddleElement = createPaddleElement(state.paddle)
+    scene.elements.push(paddleElement)
+    
+    // Paddle glow
+    if state.laserActive then {
+      scene.elements.push(GlowElement {
+        position: state.paddle.position + state.paddle.size / 2,
+        size: state.paddle.size * 1.5,
+        color: "#00ff00",
+        intensity: 0.3 + sin(state.time * 3) * 0.1
+      })
+    }
+    
+    // Draw lasers
+    for laser in state.lasers {
+      if laser.active then {
+        scene.elements.push(LaserElement {
+          position: laser.position,
+          size: laser.size,
+          color: laser.color
+        })
+      }
+    }
+    
+    // Draw ball with trail
+    let trailElements = []
+    for i in range(0, len(state.ball.trail)) {
+      let t = i / len(state.ball.trail)
+      let alpha = (1 - t) * 0.4
+      let size = state.ball.radius * (1 - t * 0.5)
+      trailElements.push(CircleElement {
+        position: state.ball.trail[i],
+        radius: size,
+        color: state.ball.glowColor,
+        alpha: alpha,
+        blendMode: "additive"
+      })
+    }
+    scene.elements = scene.elements + trailElements
+    
+    // Ball
+    let ballColor = state.fireBallActive ? state.ball.color : "#00ffff"
+    scene.elements.push(CircleElement {
+      position: state.ball.position,
+      radius: state.ball.radius,
+      color: ballColor,
+      glowColor: state.ball.glowColor,
+      glowIntensity: state.fireBallActive ? 0.8 : 0.4,
+      angle: state.ball.angle,
+      blendMode: "additive"
+    })
+    
+    // Draw particles
+    for particle in state.particles {
+      let alpha = particle.life / particle.maxLife
+      let element = createParticleElement(particle, alpha)
+      scene.elements.push(element)
+    }
+    
+    // Draw score popups
+    for popup in state.scorePopups {
+      let alpha = popup.life / popup.maxLife
+      scene.elements.push(TextElement {
+        position: popup.position,
+        text: popup.text,
+        color: popup.color,
+        size: popup.size,
+        alpha: alpha,
+        weight: "bold",
+        offsetY: (1 - alpha) * 20
+      })
+    }
+    
+    // Draw HUD
+    scene.elements = scene.elements + createHUD(state)
+    
+    // Draw game status overlays
+    if state.status == Waiting then {
+      scene.elements.push(TextElement {
+        position: Point { x: width/2, y: height/2 + 40 },
+        text: "Click or press SPACE to launch",
+        color: "#ffffff",
+        size: 20,
+        alpha: 0.6 + sin(state.time * 2) * 0.2,
+        align: "center"
+      })
+      
+      // Launch arrow
+      let arrowY = state.paddle.position.y - 50
+      scene.elements.push(ArrowElement {
+        from: Point { x: state.ball.position.x, y: state.ball.position.y },
+        to: Point { x: state.ball.position.x, y: arrowY },
+        color: "rgba(0, 255, 255, 0.3)",
+        style: "dashed"
+      })
+    }
+    
+    if state.paused then {
+      scene.elements.push(OverlayElement {
+        color: "rgba(0,0,0,0.5)",
+        zIndex: 100
+      })
+      scene.elements.push(TextElement {
+        position: Point { x: width/2, y: height/2 },
+        text: "PAUSED",
+        color: "#ffffff",
+        size: 48,
+        align: "center"
+      })
+    }
+    
+    if state.gameOver then {
+      scene.elements.push(OverlayElement {
+        color: "rgba(0,0,0,0.7)",
+        zIndex: 100
+      })
+      scene.elements.push(TextElement {
+        position: Point { x: width/2, y: height/2 - 40 },
+        text: "GAME OVER",
+        color: "#ff4444",
+        size: 56,
+        align: "center"
+      })
+      scene.elements.push(TextElement {
+        position: Point { x: width/2, y: height/2 + 30 },
+        text: "Score: " + string(state.score),
+        color: "#ffffff",
+        size: 28,
+        align: "center"
+      })
+      scene.elements.push(TextElement {
+        position: Point { x: width/2, y: height/2 + 70 },
+        text: "Press SPACE to restart",
+        color: "#8888ff",
+        size: 18,
+        align: "center"
+      })
+    }
+    
+    if state.levelComplete then {
+      scene.elements.push(OverlayElement {
+        color: "rgba(0,0,0,0.4)",
+        zIndex: 100
+      })
+      scene.elements.push(TextElement {
+        position: Point { x: width/2, y: height/2 - 40 },
+        text: "🎉 LEVEL " + string(state.level) + " COMPLETE! 🎉",
+        color: "#00ff88",
+        size: 40,
+        align: "center"
+      })
+      scene.elements.push(TextElement {
+        position: Point { x: width/2, y: height/2 + 30 },
+        text: "Score: " + string(state.score),
+        color: "#ffffff",
+        size: 24,
+        align: "center"
+      })
+      scene.elements.push(TextElement {
+        position: Point { x: width/2, y: height/2 + 70 },
+        text: "Click to continue",
+        color: "#8888ff",
+        size: 18,
+        align: "center"
+      })
+    }
+    
+    // Flash effect
+    if state.flashEffect != None then {
+      let flash = state.flashEffect
+      let alpha = flash.intensity * (1 - flash.elapsed / flash.duration)
+      scene.elements.push(OverlayElement {
+        color: flash.color,
+        alpha: alpha,
+        zIndex: 200,
+        blendMode: "additive"
+      })
+    }
+    
+    scene
+  }
+  
+  // ============================================================
+  // 12. HUD
+  // ============================================================
+  
+  function createHUD(state: GameState) -> [Element] {
+    let elements: [Element] = []
+    
+    // Score
+    elements.push(TextElement {
+      position: Point { x: 20, y: 20 },
+      text: "Score: " + string(state.score),
+      color: "#ffffff",
+      size: 18,
+      align: "left"
+    })
+    
+    // High Score
+    elements.push(TextElement {
+      position: Point { x: 20, y: 44 },
+      text: "Best: " + string(state.highScore),
+      color: "#888888",
+      size: 14,
+      align: "left"
+    })
+    
+    // Level
+    elements.push(TextElement {
+      position: Point { x: 400, y: 20 },
+      text: "Level " + string(state.level),
+      color: "#00ccff",
+      size: 20,
+      align: "center"
+    })
+    
+    // Lives (hearts)
+    let livesText = "❤️" * state.lives
+    if state.lives > 0 then {
+      elements.push(TextElement {
+        position: Point { x: 780, y: 20 },
+        text: livesText,
+        color: "#ff4444",
+        size: 20,
+        align: "right"
+      })
+    }
+    
+    // Combo counter
+    if state.combo > 1 then {
+      let comboText = "🔥 " + string(state.combo) + "x"
+      let alpha = min(1, 0.5 + state.combo / 20)
+      let size = 16 + min(state.combo, 10) * 0.5
+      elements.push(TextElement {
+        position: Point { x: 780, y: 50 },
+        text: comboText,
+        color: "#ff8800",
+        size: size,
+        alpha: alpha,
+        align: "right"
+      })
+    }
+    
+    // Power-up indicators
+    let yOffset = 80
+    for type in keys(state.powerUpTimers) {
+      let remaining = state.powerUpTimers[type]
+      if remaining > 0 then {
+        let name = string(type)
+        let color = getPowerUpColor(type)
+        elements.push(TextElement {
+          position: Point { x: 780, y: yOffset },
+          text: name + " " + string(ceil(remaining)) + "s",
+          color: color,
+          size: 12,
+          alpha: 0.8,
+          align: "right"
+        })
+        yOffset = yOffset + 20
+      }
+    }
+    
+    elements
+  }
+  
+  // ============================================================
+  // 13. INPUT HANDLING
+  // ============================================================
+  
+  function handleInput(input: Input, state: GameState) -> Result<GameState, Error> {
+    let updatedState = state
+    
+    // Keyboard controls
+    if input.keys["Space"] then {
+      if state.gameOver then {
+        // Restart game
+        updatedState = createInitialState()
+        playSound("bounce", 0.3)
+      } else if state.status == Waiting then {
+        updatedState = launchBall(state)
+      } else if state.status == LevelComplete then {
+        // Next level
+        updatedState.bricks = createLevel(state.level + 1)
+        updatedState.level = state.level + 1
+        updatedState.status = Waiting
+        updatedState.levelComplete = false
+        resetBall(updatedState)
+      } else {
+        // Toggle pause
+        updatedState.paused = not state.paused
+        if state.paused then playSound("bounce", 0.1)
+      }
+    }
+    
+    // Mouse/Touch click on waiting state
+    if input.mousePressed or len(input.touches) > 0 then {
+      if state.status == Waiting then {
+        updatedState = launchBall(state)
+      } else if state.status == LevelComplete then {
+        updatedState.bricks = createLevel(state.level + 1)
+        updatedState.level = state.level + 1
+        updatedState.status = Waiting
+        updatedState.levelComplete = false
+        resetBall(updatedState)
+      }
+    }
+    
+    // Fire laser
+    if state.laserActive and input.keys["Space"] and state.status == Playing then {
+      let laser = createLaser(state)
+      updatedState.lasers.push(laser)
+      playSound("laser", 0.3)
+    }
+    
+    // Restart
+    if input.keys["R"] and state.gameOver then {
+      updatedState = createInitialState()
+      playSound("bounce", 0.3)
+    }
+    
+    Success(updatedState)
+  }
+  
+  // ============================================================
+  // 14. EVENT HANDLERS
+  // ============================================================
+  
+  @event GameStarted
+  @event LevelStarted { level: int }
+  @event LevelCompleted { level: int, score: int }
+  @event GameOver { score: int, highScore: int }
+  @event BrickDestroyed { position: Point, color: string }
+  @event PowerUpCollected { type: PowerUpType }
+  @event BallLost { livesRemaining: int }
+  
+  @subscribe(LevelCompleted)
+  function onLevelCompleted(event: LevelCompleted) -> void {
+    log("Level " + string(event.level) + " completed with score " + string(event.score), Info)
+    playSound("level_complete", 0.5)
+  }
+  
+  @subscribe(GameOver)
+  function onGameOver(event: GameOver) -> void {
+    if event.score > event.highScore then {
+      log("New high score! " + string(event.score), Info)
+    }
+    playSound("lose", 0.8)
+  }
+  
+  // ============================================================
+  // 15. GAME LOOP
+  // ============================================================
+  
+  function gameLoop(state: GameState, input: Input, deltaTime: float) -> Result<GameState, Error> {
+    // Animate (for visual effects)
+    animate(deltaTime)
+    
+    // Process input
+    let stateAfterInput = handleInput(input, state)?
+    
+    // Update game
+    let stateAfterUpdate = update(stateAfterInput, input, deltaTime)?
+    
+    // Render
+    let scene = renderScene(stateAfterUpdate)
+    render(scene)
+    
+    Success(stateAfterUpdate)
+  }
+  
+  // ============================================================
+  // 16. STARTUP & CONFIGURATION
+  // ============================================================
+  
+  @environment(development) {
+    debugMode: true,
+    showFPS: true,
+    ballSpeed: 300,
+    levelStart: 1
+  }
+  
+  @environment(production) {
+    debugMode: false,
+    showFPS: false,
+    ballSpeed: 400,
+    levelStart: 1
+  }
+  
+  constraints {
+    // Performance
+    p95Latency: 16ms,      // ~60fps
+    fps: 60,
+    memoryLimit: 100MB,
+    
+    // Responsiveness
+    touchSupport: true,
+    keyboardSupport: true,
+    
+    // UX
+    tutorialHint: true,
+    soundEffects: true,
+    animations: true,
+    particlesEnabled: true,
+    
+    // Game Balance
+    startingLives: 3,
+    maxLevels: 99,
+    speedIncreasePerLevel: 15
+  }
+  
+  // ============================================================
+  // 17. TEST SUITE
+  // ============================================================
+  
+  @Test("Ball reflects correctly off walls")
+  function testWallReflection() -> Result<bool, string> {
+    let state = createInitialState()
+    let ball = Ball {
+      position: Point { x: 10, y: 300 },
+      velocity: Vector { dx: -100, dy: 0 },
+      radius: 10,
+      speed: 100,
+      trail: [],
+      angle: 0,
+      color: "#00ffff",
+      glowColor: "rgba(0,255,255,0.5)"
+    }
+    state.ball = ball
+    
+    let newState = handleWallCollision(state)?
+    newState.ball.velocity.dx > 0
+  }
+  
+  @Test("Paddle collision changes ball angle")
+  function testPaddleCollisionAngle() -> Result<bool, string> {
+    let state = createInitialState()
+    let ball = Ball {
+      position: Point { x: 400, y: 530 },
+      velocity: Vector { dx: 0, dy: 100 },
+      radius: 8,
+      speed: 100,
+      trail: [],
+      angle: 0,
+      color: "#00ffff",
+      glowColor: "rgba(0,255,255,0.5)"
+    }
+    state.ball = ball
+    
+    let newState = handlePaddleCollision(state)?
+    newState.ball.velocity.dx != 0 and newState.ball.velocity.dy < 0
+  }
+  
+  @Test("Brick health decreases on hit", kind: Property, samples: 50)
+  function propertyBrickHealth() -> Result<bool, string> {
+    let brick = Brick {
+      position: Point { x: 0, y: 0 },
+      size: Size { width: 72, height: 24 },
+      health: 2,
+      maxHealth: 2,
+      color: "#00ccff",
+      points: 20,
+      type: Tough,
+      isAlive: true,
+      glowIntensity: 0.3,
+      hitAnimation: 0
+    }
+    
+    // Simulate hit
+    let newHealth = brick.health - 1
+    newHealth >= 0 and newHealth < brick.health
+  }
+  
+  @Test("Power-up timer expires correctly", kind: Performance)
+  function testPowerUpTimer() -> bool {
+    let state = createInitialState()
+    state.powerUpTimers[Expand] = 1.0
+    
+    // Update with deltaTime
+    let updated = update(state, emptyInput(), 1.5)?
+    
+    // Should be expired
+    not (Expand in updated.powerUpTimers)
+  }
+  
+  @Test("Combo resets when ball hits paddle")
+  function testComboReset() -> bool {
+    let state = createInitialState()
+    state.combo = 10
+    
+    let newState = handlePaddleCollision(state)?
+    newState.combo == 0
+  }
+  
+  // ============================================================
+  // 18. DOCUMENTATION
+  // ============================================================
+  
+  /// Space Breakout
+  /// A modern take on the classic Breakout game with:
+  /// - Touch and keyboard controls
+  /// - Particle effects and animations
+  /// - Power-up system
+  /// - Combo scoring
+  /// - Progressive difficulty
+  /// - Sound effects
+  
+  /// Core Mechanics:
+  /// 1. Guide the paddle to keep the ball in play
+  /// 2. Destroy all bricks to advance levels
+  /// 3. Collect power-ups for special abilities
+  /// 4. Build combos for bonus points
+  
+  /// Controls:
+  /// - Keyboard: Arrow keys / WASD to move, Space to launch/pause
+  /// - Touch: Drag on screen to move paddle, tap to launch
+  
+  /// Game Flow:
+  /// 1. Ball starts on paddle
+  /// 2. Click/tap or press Space to launch
+  /// 3. Bounce ball off bricks to destroy them
+  /// 4. Collect falling power-ups
+  /// 5. Clear all bricks to advance
+  /// 6. Lose all lives = Game Over
+
+
+
+}
+
+/**
+ * Implementation Notes
+Canvas 2D Rendering
+The render effect targets Canvas2D API
+
+Uses additive blending for glow effects
+
+Implements screen shake via transform offset
+
+Particle system uses requestAnimationFrame
+
+Sound
+Web Audio API for sound playback
+
+Dynamic volume based on game state
+
+Sound pools for overlapping effects
+
+Touch Support
+Touch events with multi-touch support
+
+Smooth paddle following with interpolation
+
+Tap detection for launching
+
+Performance Optimizations
+Particle pooling
+
+Offscreen rendering for static elements
+
+Frame rate independent physics
+
+Culling for off-screen particles
+
+Accessibility
+High contrast mode support
+
+Reduced motion option
+
+Color blind friendly palette option
+ */

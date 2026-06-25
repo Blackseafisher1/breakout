@@ -1,0 +1,1109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Space Breakout</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh;overflow:hidden;font-family:'Segoe UI',Arial,sans-serif}
+canvas{display:block;border:1px solid #1a1a3a;border-radius:4px;max-width:100vw;max-height:100vh;cursor:none;touch-action:none}
+#ui{position:absolute;color:#888;font-size:12px;top:8px;right:8px;opacity:0.5;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">FPS: <span id="fps">0</span></div>
+<script>
+const PI = Math.PI, TAU = PI * 2
+function rand(a,b){return a+Math.random()*(b-a)}
+function randInt(a,b){return Math.floor(rand(a,b+1))}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+function lerp(a,b,t){return a+(b-a)*t}
+function sign(v){return v<0?-1:1}
+
+// Types
+const CollisionSide={Top:1,Bottom:2,Left:3,Right:4,None:0}
+const BrickType={Standard:0,Tough:1,Steel:2,PowerUp:3,Bonus:4,Indestructible:5}
+const PowerUpType={Expand:0,Shrink:1,MultiBall:2,FastBall:3,SlowBall:4,FireBall:5,ExtraLife:6,Laser:7,Magnet:8,Through:9}
+const GameStatus={Waiting:0,Playing:1,LevelComplete:2,GameOver:3,Paused:4}
+const ParticleType={Spark:0,Explosion:1,Trail:2,Star:3,Glow:4,BrickPiece:5}
+
+const W=800,H=600
+
+// Audio
+let audioCtx=null
+function initAudio(){
+  if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)()
+}
+function playTone(freq,dur,type='square',vol=0.15){
+  try{
+    initAudio()
+    const o=audioCtx.createOscillator(),g=audioCtx.createGain()
+    o.type=type;o.frequency.value=freq;g.gain.setValueAtTime(vol,audioCtx.currentTime)
+    g.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+dur)
+    o.connect(g);g.connect(audioCtx.destination);o.start();o.stop(audioCtx.currentTime+dur)
+  }catch(e){}
+}
+const sounds={
+  bounce:()=>playTone(440,0.08,'square',0.08),
+  brick:()=>playTone(660,0.1,'square',0.1),
+  powerup:()=>{playTone(523,0.1,'sine',0.12);setTimeout(()=>playTone(659,0.1,'sine',0.12),100);setTimeout(()=>playTone(784,0.15,'sine',0.12),200)},
+  lose:()=>{playTone(300,0.2,'sawtooth',0.1);setTimeout(()=>playTone(200,0.3,'sawtooth',0.1),150)},
+  win:()=>{playTone(523,0.1,'sine',0.1);setTimeout(()=>playTone(659,0.1,'sine',0.1),100);setTimeout(()=>playTone(784,0.1,'sine',0.1),200);setTimeout(()=>playTone(1047,0.2,'sine',0.1),300)},
+  laser:()=>playTone(880,0.05,'sawtooth',0.06),
+  explosion:()=>{for(let i=0;i<5;i++)setTimeout(()=>playTone(rand(80,200),0.15,'sawtooth',0.08),i*30)},
+  level_complete:()=>{const n=[523,659,784,1047];n.forEach((f,i)=>setTimeout(()=>playTone(f,0.15,'sine',0.12),i*120))}
+}
+function playSound(name,vol=0.5){if(sounds[name])sounds[name]();else console.log('sound:',name,vol)}
+
+// Stars
+function generateStars(n){
+  const s=[]
+  for(let i=0;i<n;i++)s.push({x:rand(0,W),y:rand(0,H),r:rand(0.5,2),b:rand(0.3,1)})
+  return s
+}
+const stars=generateStars(100)
+
+// ===== GAME STATE =====
+function createInitialState(){
+  return {
+    ball:{
+      x:400,y:520,dx:0,dy:0,r:8,speed:400,
+      trail:[],angle:0,color:'#00ffff',glowColor:'rgba(0,255,255,0.5)'
+    },
+    paddle:{
+      x:150,y:550,w:100,h:14,speed:500,
+      targetX:150,color:'#0088ff',glowColor:'rgba(0,136,255,0.5)',
+      stretch:1,angle:0
+    },
+    bricks:createLevel(1),
+    powerUps:[],lasers:[],
+    score:0,lives:3,highScore:parseInt(localStorage.getItem('breakout_high')||'0')||0,
+    level:1,combo:0,maxCombo:0,
+    status:GameStatus.Waiting,paused:false,gameOver:false,levelComplete:false,
+    time:0,levelStartTime:0,
+    powerUpTimers:{},
+    fireBallActive:false,laserActive:false,magnetActive:false,throughActive:false,
+    particles:[],scorePopups:[],
+    shakeIntensity:0,flashEffect:null,
+    balls:[]
+  }
+}
+
+function createLevel(level){
+  const cols=10,bw=72,bh=24,gap=4,m=20
+  let rows=Math.min(8,5+(level-1)*1)
+  const bricks=[]
+  const configs=[
+    ['#ff4444',10,BrickType.Standard,1],
+    ['#ff8800',10,BrickType.Standard,1],
+    ['#ffcc00',10,BrickType.Standard,1],
+    ['#44ff44',15,BrickType.PowerUp,1],
+    ['#00ccff',20,BrickType.Tough,2],
+    ['#8888ff',30,BrickType.Steel,3],
+    ['#ff44ff',50,BrickType.Bonus,1],
+    ['#666666',0,BrickType.Indestructible,999]
+  ]
+  const offset=Math.min(level-1,3)
+  for(let r=0;r<rows;r++){
+    const rc=configs[(r+offset)%configs.length]
+    for(let c=0;c<cols;c++){
+      const x=m+c*(bw+gap),y=50+r*(bh+gap)
+      let skip=false
+      const mid=Math.floor(cols/2)
+      if(level===2)skip=c<mid-r||c>=mid+r+1
+      else if(level===3)skip=(r+c)%2!==0
+      else if(level===4){const d=Math.abs(r-Math.floor(rows/2));skip=c<mid-d||c>=mid+d+1}
+      else if(level===5)skip=c<Math.floor(r/2)||c>=cols-Math.floor(r/2)
+      else if(level>=6&&((r+c)%3)==0)skip=true
+      if(skip)continue
+      let type=rc[2],health=rc[3],points=rc[1]
+      if(level>=5&&r%2==0&&c%2==0){type=BrickType.Tough;health=2;points=20}
+      bricks.push({
+        x,y,w:bw,h:bh,health,maxHealth:health,color:rc[0],points,type,
+        isAlive:true,glowIntensity:rand(0.3,0.6),hitAnimation:0
+      })
+    }
+  }
+  return bricks
+}
+
+// ===== COLLISION =====
+function rectCircleCollision(rect,circle){
+  const cx=clamp(circle.x,rect.x,rect.x+rect.w)
+  const cy=clamp(circle.y,rect.y,rect.y+rect.h)
+  const dx=circle.x-cx,dy=circle.y-cy
+  const dist=Math.sqrt(dx*dx+dy*dy)
+  if(dist>circle.r)return CollisionSide.None
+  const ox=(rect.w/2+circle.r)-Math.abs(dx)
+  const oy=(rect.h/2+circle.r)-Math.abs(dy)
+  if(ox<oy)return dx<0?CollisionSide.Left:CollisionSide.Right
+  return dy<0?CollisionSide.Top:CollisionSide.Bottom
+}
+
+function rectCollision(a,b){
+  return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y
+}
+
+function reflectBall(vx,vy,side){
+  if(side===CollisionSide.Top||side===CollisionSide.Bottom)return{vx,vy:-vy}
+  if(side===CollisionSide.Left||side===CollisionSide.Right)return{vx:-vx,vy}
+  return{vx,vy}
+}
+
+// ===== PARTICLES =====
+function createExplosionParticles(x,y,color,count){
+  const p=[]
+  for(let i=0;i<count;i++){
+    const a=rand(0,TAU),s=rand(50,250),life=rand(0.5,1.3)
+    p.push({
+      x,y,dx:Math.cos(a)*s,dy:Math.sin(a)*s,
+      w:rand(2,6),h:rand(2,6),life,maxLife:life,
+      color,type:ParticleType.Explosion,gravity:100,fadeOut:true,
+      rot:rand(0,TAU),rotSpeed:rand(-5,5)
+    })
+  }
+  return p
+}
+
+function createBounceParticles(x,y,color){
+  const p=[]
+  for(let i=0;i<5;i++){
+    const a=-PI/2+rand(-0.5,0.5)*PI,s=rand(30,110),life=rand(0.3,0.6)
+    p.push({
+      x,y,dx:Math.cos(a)*s,dy:Math.sin(a)*s,
+      w:rand(2,4),h:rand(2,4),life,maxLife:0.6,
+      color,type:ParticleType.Spark,gravity:50,fadeOut:true,
+      rot:0,rotSpeed:0
+    })
+  }
+  return p
+}
+
+function updateParticles(particles,dt){
+  const r=[]
+  for(const p of particles){
+    const nx=p.x+p.dx*dt,ny=p.y+p.dy*dt,nl=p.life-dt
+    if(nl>0){
+      r.push({
+        ...p,
+        x:nx,y:ny,
+        dx:p.dx,dy:p.dy+p.gravity*dt,
+        life:nl,
+        rot:p.rot+p.rotSpeed*dt,
+        w:p.w*(0.5+0.5*nl/p.maxLife),h:p.h*(0.5+0.5*nl/p.maxLife)
+      })
+    }
+  }
+  return r
+}
+
+function updateScorePopups(popups,dt){
+  const r=[]
+  for(const p of popups){
+    const nx=p.x+p.dx*dt,ny=p.y+p.dy*dt,nl=p.life-dt
+    if(nl>0){
+      r.push({
+        ...p,x:nx,y:ny,
+        dx:p.dx,dy:p.dy+30*dt,
+        life:nl,
+        size:p.size*(1+(1-nl/p.maxLife)*0.3)
+      })
+    }
+  }
+  return r
+}
+
+// ===== POWER UPS =====
+function createRandomPowerUp(x,y){
+  const types=[PowerUpType.Expand,PowerUpType.Shrink,PowerUpType.MultiBall,PowerUpType.FastBall,
+    PowerUpType.SlowBall,PowerUpType.FireBall,PowerUpType.ExtraLife,PowerUpType.Laser,PowerUpType.Magnet]
+  const type=types[randInt(0,types.length-1)]
+  const configs={
+    [PowerUpType.Expand]:{color:'#00ff88',icon:'⬜',glow:'rgba(0,255,136,0.5)'},
+    [PowerUpType.Shrink]:{color:'#ff4444',icon:'⬜',glow:'rgba(255,68,68,0.5)'},
+    [PowerUpType.MultiBall]:{color:'#ff8800',icon:'◯',glow:'rgba(255,136,0,0.5)'},
+    [PowerUpType.FastBall]:{color:'#ff00ff',icon:'⚡',glow:'rgba(255,0,255,0.5)'},
+    [PowerUpType.SlowBall]:{color:'#00ccff',icon:'🐢',glow:'rgba(0,204,255,0.5)'},
+    [PowerUpType.FireBall]:{color:'#ff4400',icon:'🔥',glow:'rgba(255,68,0,0.5)'},
+    [PowerUpType.ExtraLife]:{color:'#ff00ff',icon:'♥',glow:'rgba(255,0,255,0.5)'},
+    [PowerUpType.Laser]:{color:'#00ff00',icon:'🔫',glow:'rgba(0,255,0,0.5)'},
+    [PowerUpType.Magnet]:{color:'#8888ff',icon:'🧲',glow:'rgba(136,136,255,0.5)'}
+  }
+  const c=configs[type]
+  return{x,y,type,dx:0,dy:100,w:20,h:20,duration:10,active:true,glowColor:c.glow,icon:c.icon,color:c.color}
+}
+
+function applyPowerUp(state,pu){
+  const s=state
+  switch(pu.type){
+    case PowerUpType.Expand:{
+      const nw=s.paddle.w*1.5
+      s.paddle.x-=(nw-s.paddle.w)/2
+      s.paddle.w=nw
+      s.powerUpTimers[PowerUpType.Expand]=pu.duration
+      break
+    }
+    case PowerUpType.Shrink:{
+      const nw=s.paddle.w*0.6
+      s.paddle.x+=(s.paddle.w-nw)/2
+      s.paddle.w=nw
+      s.powerUpTimers[PowerUpType.Shrink]=pu.duration
+      break
+    }
+    case PowerUpType.MultiBall:{
+      const b=s.ball
+      s.balls.push({...b,x:b.x-20},{...b,x:b.x+20})
+      break
+    }
+    case PowerUpType.FastBall:{
+      const ns=s.ball.speed*1.3,vel=Math.sqrt(s.ball.dx**2+s.ball.dy**2)
+      if(vel>0){const sc=ns/vel;s.ball.dx*=sc;s.ball.dy*=sc}
+      s.ball.speed=ns
+      s.powerUpTimers[PowerUpType.FastBall]=pu.duration
+      break
+    }
+    case PowerUpType.SlowBall:{
+      const ns=s.ball.speed*0.7,vel=Math.sqrt(s.ball.dx**2+s.ball.dy**2)
+      if(vel>0){const sc=ns/vel;s.ball.dx*=sc;s.ball.dy*=sc}
+      s.ball.speed=ns
+      s.powerUpTimers[PowerUpType.SlowBall]=pu.duration
+      break
+    }
+    case PowerUpType.FireBall:{
+      s.fireBallActive=true
+      s.ball.color='#ff4400'
+      s.ball.glowColor='rgba(255,68,0,0.6)'
+      s.powerUpTimers[PowerUpType.FireBall]=pu.duration
+      break
+    }
+    case PowerUpType.ExtraLife:{s.lives++;break}
+    case PowerUpType.Laser:{s.laserActive=true;s.powerUpTimers[PowerUpType.Laser]=pu.duration;break}
+    case PowerUpType.Magnet:{s.magnetActive=true;s.powerUpTimers[PowerUpType.Magnet]=pu.duration;break}
+    case PowerUpType.Through:{s.throughActive=true;s.powerUpTimers[PowerUpType.Through]=pu.duration;break}
+  }
+  playSound('powerup',0.5)
+  return s
+}
+
+function removePowerUpEffect(state,type){
+  type=Number(type)
+  if(type===PowerUpType.Expand||type===PowerUpType.Shrink){state.paddle.w=100;state.paddle.x=clamp(state.paddle.x,0,W-100)}
+  if(type===PowerUpType.FastBall||type===PowerUpType.SlowBall)state.ball.speed=400
+  if(type===PowerUpType.FireBall){state.fireBallActive=false;state.ball.color='#00ffff';state.ball.glowColor='rgba(0,255,255,0.5)'}
+  if(type===PowerUpType.Laser)state.laserActive=false
+  if(type===PowerUpType.Magnet)state.magnetActive=false
+  if(type===PowerUpType.Through)state.throughActive=false
+}
+
+function createLaser(state){
+  return{
+    x:state.paddle.x+state.paddle.w/2-2,
+    y:state.paddle.y-10,
+    dx:0,dy:-600,w:4,h:16,
+    active:true,color:'#00ff00'
+  }
+}
+
+// ===== BALL HELPERS =====
+function updateBall(ball,dt,boost){
+  let dx=ball.dx*boost,dy=ball.dy*boost
+  ball.x+=dx*dt;ball.y+=dy*dt;ball.angle+=dt*3
+  return ball
+}
+
+function handleWallCollision(state){
+  const b=state.ball
+  if(b.x-b.r<0){b.dx=Math.abs(b.dx);b.x=b.r;playSound('bounce',0.2)}
+  if(b.x+b.r>W){b.dx=-Math.abs(b.dx);b.x=W-b.r;playSound('bounce',0.2)}
+  if(b.y-b.r<0){b.dy=Math.abs(b.dy);b.y=b.r;playSound('bounce',0.2)}
+  return state
+}
+
+function resetBall(state){
+  const b=state.ball
+  b.x=state.paddle.x+state.paddle.w/2
+  b.y=state.paddle.y-b.r-5
+  b.dx=0;b.dy=0
+  state.status=GameStatus.Waiting
+  return state
+}
+
+function launchBall(state){
+  if(state.status!==GameStatus.Waiting)return state
+  const a=-PI/3+rand(0,PI/6),spd=state.ball.speed
+  state.ball.dx=Math.sin(a)*spd
+  state.ball.dy=-Math.cos(a)*spd
+  state.status=GameStatus.Playing
+  return state
+}
+
+// ===== PADDLE =====
+function updatePaddle(paddle,input,dt){
+  const spd=paddle.speed*settings.keySensitivity*(input.cPressed?2:1)
+
+  if(input.touches.length>0){
+    const t=input.touches[0]
+    paddle.x+=clamp(t.x-paddle.w/2-paddle.x,-spd*dt,spd*dt)
+  }else if(input.leftKeyPressed||input.rightKeyPressed){
+    let mx=input.leftKeyPressed?-1:1
+    paddle.x+=mx*spd*dt
+  }else if(input.mouseDeltaX!==0){
+    paddle.x+=input.mouseDeltaX*settings.mouseSensitivity
+    input.mouseDeltaX=0
+  }
+  paddle.x=clamp(paddle.x,0,W-paddle.w)
+  return paddle
+}
+
+// ===== HANDLE PADDLE COLLISION =====
+function handlePaddleCollision(state){
+  const b=state.ball,p=state.paddle
+  const rect={x:p.x,y:p.y,w:p.w,h:p.h},circle={x:b.x,y:b.y,r:b.r}
+  const col=rectCircleCollision(rect,circle)
+  if(col===CollisionSide.None)return state
+
+  const hit=(b.x-p.x)/p.w
+  const angle=(hit-0.5)*1.2
+  const spd=b.speed
+  b.dx=Math.sin(angle)*spd
+  b.dy=-Math.abs(Math.cos(angle)*spd)
+  if(Math.abs(b.dy)<spd*0.3)b.dy=-spd*0.3*sign(b.dy||1)
+  b.y=p.y-b.r-1
+
+  playSound('bounce',0.5)
+  state.combo=0
+  state.particles=state.particles.concat(createBounceParticles(b.x,b.y,b.color))
+  return state
+}
+
+// ===== HANDLE BRICK COLLISION =====
+function handleBrickCollision(state){
+  const b=state.ball,circle={x:b.x,y:b.y,r:b.r}
+  let col=false,newScore=state.score,newCombo=state.combo+1
+  const newParts=[],newPopups=[],newBricks=[]
+  for(let bi=0;bi<state.bricks.length;bi++){
+    const brick=state.bricks[bi]
+    if(!brick.isAlive){newBricks.push(brick);continue}
+    const rect={x:brick.x,y:brick.y,w:brick.w,h:brick.h}
+    const c=rectCircleCollision(rect,circle)
+    if(c===CollisionSide.None){newBricks.push(brick);continue}
+    col=true
+
+    if(brick.type===BrickType.Indestructible){
+      const r=reflectBall(b.dx,b.dy,c)
+      b.dx=r.vx;b.dy=r.vy
+      if(c===CollisionSide.Left)b.x=brick.x-b.r-1
+      else if(c===CollisionSide.Right)b.x=brick.x+brick.w+b.r+1
+      else if(c===CollisionSide.Top)b.y=brick.y-b.r-1
+      else b.y=brick.y+brick.h+b.r+1
+      state.flashEffect={color:'#ff4444',intensity:0.5,duration:0.1,elapsed:0}
+      state.shakeIntensity=0.05
+      playSound('bounce',0.3)
+      newBricks.push(brick)
+      continue
+    }
+
+    let newH=brick.health-1,destroyed=newH<=0
+    if(state.fireBallActive){newH=0;destroyed=true}
+    brick.health=newH
+    brick.isAlive=!destroyed
+    brick.hitAnimation=1.0
+
+    if(destroyed){
+      const pts=brick.points*(1+state.combo/10)
+      newScore+=pts
+      if(newCombo>state.maxCombo)state.maxCombo=newCombo
+      newParts.push(...createExplosionParticles(brick.x+brick.w/2,brick.y+brick.h/2,brick.color,20))
+      newPopups.push({
+        x:brick.x+brick.w/2,y:brick.y+brick.h/2,
+        text:'+'+pts+(newCombo>1?' x'+newCombo:''),
+        color:brick.color,life:1,maxLife:1,
+        dx:rand(-25,25),dy:-80,size:16+Math.min(newCombo,5)*2
+      })
+      if(brick.type===BrickType.PowerUp&&Math.random()<0.3)
+        state.powerUps.push(createRandomPowerUp(brick.x+brick.w/2,brick.y+brick.h/2))
+      playSound('brick',0.4)
+      state.shakeIntensity=0.1
+    }else{
+      playSound('bounce',0.2)
+      state.shakeIntensity=0.03
+    }
+
+    const r=reflectBall(b.dx,b.dy,c)
+    b.dx=r.vx;b.dy=r.vy
+    if(c===CollisionSide.Left)b.x=brick.x-b.r-1
+    else if(c===CollisionSide.Right)b.x=brick.x+brick.w+b.r+1
+    else if(c===CollisionSide.Top)b.y=brick.y-b.r-1
+    else b.y=brick.y+brick.h+b.r+1
+    newBricks.push(brick)
+    // Append remaining bricks after the hit one
+    for(let j=bi+1;j<state.bricks.length;j++)newBricks.push(state.bricks[j])
+    break
+  }
+
+  if(col){
+    state.bricks=newBricks
+    state.score=newScore
+    state.combo=newCombo
+    state.particles=state.particles.concat(newParts)
+    state.scorePopups=state.scorePopups.concat(newPopups)
+  }
+  return state
+}
+
+// ===== INPUT =====
+let showLevelSelect=false,lsCursor=1
+const settings={mouseSensitivity:1,keySensitivity:1,showSettings:false,selected:0}
+const input={
+  keys:{},touches:[],mouseX:0,mouseY:0,mouseDeltaX:0,lastMouseX:-1,mousePressed:false,
+  leftKeyPressed:false,rightKeyPressed:false,spacePressed:false,rPressed:false,zPressed:false,cPressed:false
+}
+
+document.addEventListener('keydown',e=>{
+  input.keys[e.code]=true
+  if(e.code==='ArrowLeft'||e.code==='KeyA')input.leftKeyPressed=true
+  if(e.code==='ArrowRight'||e.code==='KeyD')input.rightKeyPressed=true
+  if(e.code==='Escape'&&!e.repeat){input.keys['Escape']=true;e.preventDefault()}
+  if(e.code==='KeyS'&&!e.repeat){input.keys['KeyS']=true}
+  if(e.code==='Space'&&!e.repeat)input.spacePressed=true
+  if(e.code==='KeyR'&&!e.repeat)input.rPressed=true
+  if(e.code==='KeyZ'||e.code==='KeyY'){e.preventDefault();input.zPressed=true}
+  if(e.code==='KeyC'){e.preventDefault();input.cPressed=true}
+  if(e.ctrlKey&&e.code==='KeyL'){e.preventDefault();input.keys['CtrlL']=true}
+  if(e.code==='Enter'&&!e.repeat){e.preventDefault();input.keys['Enter']=true}
+})
+document.addEventListener('keyup',e=>{
+  input.keys[e.code]=false
+  if(e.code==='ArrowLeft'||e.code==='KeyA')input.leftKeyPressed=false
+  if(e.code==='ArrowRight'||e.code==='KeyD')input.rightKeyPressed=false
+  if(e.code==='Space')input.spacePressed=false
+  if(e.code==='KeyZ'||e.code==='KeyY')input.zPressed=false
+  if(e.code==='KeyC')input.cPressed=false
+})
+
+function handleSettingsInput(){
+  const l=input.leftKeyPressed,r=input.rightKeyPressed
+  const u=input.keys['ArrowUp'],d=input.keys['ArrowDown']
+  if(u||d){
+    settings.selected=(settings.selected+(d?1:-1)+2)%2
+    input.keys['ArrowUp']=false;input.keys['ArrowDown']=false
+  }
+  if(l&&!settings._l){settings._l=true
+    if(settings.selected===0)settings.mouseSensitivity=clamp(+(settings.mouseSensitivity-0.2).toFixed(1),0.1,3)
+    else settings.keySensitivity=clamp(+(settings.keySensitivity-0.2).toFixed(1),0.1,3)
+  }
+  if(!l)settings._l=false
+  if(r&&!settings._r){settings._r=true
+    if(settings.selected===0)settings.mouseSensitivity=clamp(+(settings.mouseSensitivity+0.2).toFixed(1),0.1,3)
+    else settings.keySensitivity=clamp(+(settings.keySensitivity+0.2).toFixed(1),0.1,3)
+  }
+  if(!r)settings._r=false
+}
+
+function handleInput(state){
+  const sp=input.spacePressed,ms=input.mousePressed||input.touches.length>0
+
+  if(input.keys['CtrlL']){showLevelSelect=!showLevelSelect;input.keys['CtrlL']=false;if(showLevelSelect)state.paused=true}
+
+  if(showLevelSelect){
+    // Keyboard navigation
+    const lk=input.keys['ArrowLeft'],rk=input.keys['ArrowRight']
+    const uk=input.keys['ArrowUp'],dk=input.keys['ArrowDown']
+    if(uk||dk||lk||rk){
+      const col=(lsCursor-1)%6,row=Math.floor((lsCursor-1)/6)
+      let nc=col,nr=row
+      if(lk)nc=(nc-1+6)%6
+      if(rk)nc=(nc+1)%6
+      if(uk)nr=(nr-1+2)%2
+      if(dk)nr=(nr+1)%2
+      lsCursor=nr*6+nc+1
+      input.keys['ArrowLeft']=false;input.keys['ArrowRight']=false
+      input.keys['ArrowUp']=false;input.keys['ArrowDown']=false
+    }
+    if(sp||input.keys['Enter']){
+      state=createInitialState();state.level=lsCursor;state.bricks=createLevel(lsCursor)
+      resetBall(state);showLevelSelect=false;input.keys['Enter']=false;return state
+    }
+    // Mouse / ESC
+    if(ms||input.keys['Escape']){
+      const mx=input.mouseX,my=input.mouseY
+      let clicked=false
+      for(let lv=1;lv<=12;lv++){
+        const col=(lv-1)%6,row=Math.floor((lv-1)/6)
+        const bx=220+col*65,by=H/2-40+row*55
+        if(ms&&mx>bx&&mx<bx+55&&my>by&&my<by+40){
+          state=createInitialState();state.level=lv;state.bricks=createLevel(lv)
+          resetBall(state);showLevelSelect=false;clicked=true;break
+        }
+      }
+      if(!clicked){
+        if(ms&&mx>350&&mx<450&&my>H/2+100&&my<H/2+130)showLevelSelect=false
+        else if(input.keys['Escape'])showLevelSelect=false
+      }
+      input.keys['Escape']=false
+    }
+    return state
+  }
+
+  if(state.laserActive&&sp&&state.status===GameStatus.Playing){
+    state.lasers.push(createLaser(state));playSound('laser',0.3)
+  }
+
+  if(state.gameOver&&(sp||input.rPressed)){
+    state=createInitialState();playSound('bounce',0.3);return state
+  }
+  if(state.status===GameStatus.Waiting&&(sp||ms)){
+    state=launchBall(state);return state
+  }
+  if(state.status===GameStatus.LevelComplete&&(sp||ms)){
+    state.level++;state.bricks=createLevel(state.level)
+    state.status=GameStatus.Waiting;state.levelComplete=false;resetBall(state);return state
+  }
+
+  if(state.paused&&settings.showSettings){
+    handleSettingsInput()
+    if(ms){
+      const mx=input.mouseX,my=input.mouseY
+      for(let i=0;i<2;i++){
+        const y=H/2+10+i*45
+        if(my>y-15&&my<y+15){
+          if(mx>350&&mx<380){
+            const nv=i===0?clamp(+(settings.mouseSensitivity-0.2).toFixed(1),0.1,3):clamp(+(settings.keySensitivity-0.2).toFixed(1),0.1,3)
+            if(i===0)settings.mouseSensitivity=nv;else settings.keySensitivity=nv
+          }
+          if(mx>420&&mx<450){
+            const nv=i===0?clamp(+(settings.mouseSensitivity+0.2).toFixed(1),0.1,3):clamp(+(settings.keySensitivity+0.2).toFixed(1),0.1,3)
+            if(i===0)settings.mouseSensitivity=nv;else settings.keySensitivity=nv
+          }
+        }
+      }
+    }
+  }else{
+    if(ms&&!sp){
+      if(state.paused&&!settings.showSettings){
+        const mx=input.mouseX,my=input.mouseY
+        if(my>H/2-25&&my<H/2+5&&mx>330&&mx<470)settings.showSettings=true
+        else if(my>H/2+10&&my<H/2+40&&mx>330&&mx<470)showLevelSelect=true
+      }else if(state.status===GameStatus.Waiting){
+        const mx=input.mouseX,my=input.mouseY
+        if(my>H/2+60&&my<H/2+85&&mx>330&&mx<470)showLevelSelect=true
+        else state=launchBall(state)
+      }
+      else if(state.status===GameStatus.LevelComplete){
+        state.level++;state.bricks=createLevel(state.level)
+        state.status=GameStatus.Waiting;state.levelComplete=false;resetBall(state)
+      }
+    }
+  }
+
+  if(input.keys['Escape']&&!state.paused){state.paused=true;input.keys['Escape']=false}
+  else if(input.keys['Escape']&&state.paused){
+    if(settings.showSettings)settings.showSettings=false
+    else{state.paused=false;input.keys['Escape']=false}
+  }
+  if(input.keys['KeyS']&&state.paused){settings.showSettings=!settings.showSettings;input.keys['KeyS']=false}
+  if(input.rPressed&&state.gameOver){state=createInitialState();playSound('bounce',0.3)}
+  return state
+}
+
+// ===== CANVAS SETUP =====
+const canvas=document.getElementById('c')
+const ctx=canvas.getContext('2d')
+canvas.width=W;canvas.height=H
+const fpsEl=document.getElementById('fps')
+
+// Touch handling
+canvas.addEventListener('touchstart',e=>{
+  e.preventDefault();initAudio()
+  const rect=canvas.getBoundingClientRect(),scaleX=W/rect.width,scaleY=H/rect.height
+  input.touches=Array.from(e.touches).map(t=>({
+    id:t.identifier,x:(t.clientX-rect.left)*scaleX,y:(t.clientY-rect.top)*scaleY,isActive:true
+  }))
+  input.mousePressed=true
+})
+canvas.addEventListener('touchmove',e=>{
+  e.preventDefault()
+  const rect=canvas.getBoundingClientRect(),scaleX=W/rect.width,scaleY=H/rect.height
+  for(const t of e.touches){
+    const found=input.touches.find(tc=>tc.id===t.identifier)
+    if(found){found.x=(t.clientX-rect.left)*scaleX;found.y=(t.clientY-rect.top)*scaleY}
+  }
+})
+canvas.addEventListener('touchend',e=>{
+  e.preventDefault()
+  input.touches=input.touches.filter(t=>Array.from(e.touches).some(et=>et.identifier===t.id))
+  if(input.touches.length===0)input.mousePressed=false
+})
+
+canvas.addEventListener('mousedown',e=>{
+  initAudio()
+  const rect=canvas.getBoundingClientRect(),scaleX=W/rect.width,scaleY=H/rect.height
+  input.mouseX=(e.clientX-rect.left)*scaleX
+  input.mouseY=(e.clientY-rect.top)*scaleY
+  input.mousePressed=true
+})
+canvas.addEventListener('mousemove',e=>{
+  const rect=canvas.getBoundingClientRect(),scaleX=W/rect.width,scaleY=H/rect.height
+  const mx=(e.clientX-rect.left)*scaleX
+  input.mouseY=(e.clientY-rect.top)*scaleY
+  if(input.lastMouseX>=0)input.mouseDeltaX+=mx-input.lastMouseX
+  input.lastMouseX=mx
+  input.mouseX=mx
+})
+canvas.addEventListener('mouseup',()=>{input.mousePressed=false})
+canvas.addEventListener('mouseleave',()=>{input.lastMouseX=-1;input.mouseDeltaX=0})
+
+// ===== RENDER =====
+function render(state){
+  ctx.save()
+  // Screen shake
+  if(state.shakeIntensity>0){
+    ctx.translate(rand(-1,1)*state.shakeIntensity*20,rand(-1,1)*state.shakeIntensity*20)
+  }
+
+  // Background
+  ctx.fillStyle='#0a0a1a';ctx.fillRect(-5,-5,W+10,H+10)
+
+  // Stars
+  for(const s of stars){
+    ctx.globalAlpha=s.b*0.5;ctx.fillStyle='#fff'
+    ctx.beginPath();ctx.arc(s.x,s.y,s.r,0,TAU);ctx.fill()
+  }
+  ctx.globalAlpha=1
+
+  // Grid
+  ctx.strokeStyle='rgba(255,255,255,0.02)';ctx.lineWidth=1
+  for(let i=0;i<10;i++){const x=i*80;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke()}
+
+  // Bricks
+  for(const brick of state.bricks){
+    if(!brick.isAlive)continue
+    ctx.save()
+    if(brick.glowIntensity>0.2){
+      ctx.shadowColor=brick.color;ctx.shadowBlur=brick.glowIntensity*15
+    }
+    if(brick.type===BrickType.Indestructible){
+      ctx.fillStyle='#555';ctx.fillRect(brick.x,brick.y,brick.w,brick.h)
+      ctx.strokeStyle='#888';ctx.lineWidth=1;ctx.strokeRect(brick.x,brick.y,brick.w,brick.h)
+    }else if(state.fireBallActive){
+      ctx.fillStyle='#ff4400'
+      roundRect(ctx,brick.x,brick.y,brick.w,brick.h,3);ctx.fill()
+    }else{
+      ctx.fillStyle=brick.color
+      roundRect(ctx,brick.x,brick.y,brick.w,brick.h,3);ctx.fill()
+      // Highlight
+      ctx.fillStyle='rgba(255,255,255,0.15)'
+      ctx.fillRect(brick.x+2,brick.y+2,brick.w-4,brick.h/3)
+    }
+    if(brick.hitAnimation>0){
+      ctx.globalAlpha=brick.hitAnimation*0.6
+      ctx.fillStyle='#fff';roundRect(ctx,brick.x,brick.y,brick.w,brick.h,3);ctx.fill()
+      ctx.globalAlpha=1
+    }
+    ctx.restore()
+  }
+
+  // Power-ups
+  for(const pu of state.powerUps){
+    if(!pu.active)continue
+    const off=Math.sin(state.time*2+pu.x)*3
+    ctx.save()
+    ctx.shadowColor=pu.glowColor;ctx.shadowBlur=12
+    ctx.fillStyle=pu.color;roundRect(ctx,pu.x,pu.y+off,pu.w,pu.h,4);ctx.fill()
+    ctx.shadowBlur=0
+    ctx.fillStyle='#fff';ctx.font='12px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
+    ctx.fillText(pu.icon,pu.x+pu.w/2,pu.y+off+pu.h/2)
+    ctx.restore()
+  }
+
+  // Paddle
+  const p=state.paddle
+  ctx.save()
+  ctx.translate(p.x+p.w/2,p.y+p.h/2)
+  ctx.scale(p.stretch,2-p.stretch)
+  ctx.rotate(p.angle)
+  ctx.shadowColor=p.glowColor;ctx.shadowBlur=10
+  ctx.fillStyle=p.color
+  roundRect(ctx,-p.w/2,-p.h/2,p.w,p.h,4);ctx.fill()
+  if(state.laserActive){
+    ctx.shadowColor='#00ff00';ctx.shadowBlur=20
+    ctx.strokeStyle='#00ff00';ctx.lineWidth=2
+    roundRect(ctx,-p.w/2,-p.h/2,p.w,p.h,4);ctx.stroke()
+    ctx.shadowBlur=0
+  }
+  ctx.restore()
+
+  // Lasers
+  for(const l of state.lasers){
+    if(!l.active)continue
+    ctx.save()
+    ctx.shadowColor='#00ff00';ctx.shadowBlur=8
+    ctx.fillStyle='#00ff00';ctx.fillRect(l.x,l.y,l.w,l.h)
+    ctx.restore()
+  }
+
+  // Ball trail
+  const b=state.ball
+  for(let i=0;i<b.trail.length;i++){
+    const t=i/b.trail.length,alpha=(1-t)*0.4,size=b.r*(1-t*0.5)
+    ctx.globalAlpha=alpha
+    ctx.fillStyle=b.glowColor
+    ctx.beginPath();ctx.arc(b.trail[i].x,b.trail[i].y,size,0,TAU);ctx.fill()
+  }
+  ctx.globalAlpha=1
+
+  // Ball
+  ctx.save()
+  ctx.translate(b.x,b.y);ctx.rotate(b.angle)
+  const bc=state.fireBallActive?'#ff4400':'#00ffff'
+  ctx.shadowColor=b.glowColor;ctx.shadowBlur=state.fireBallActive?20:12
+  ctx.fillStyle=bc;ctx.beginPath();ctx.arc(0,0,b.r,0,TAU);ctx.fill()
+  ctx.shadowBlur=0
+  ctx.fillStyle='rgba(255,255,255,0.4)'
+  ctx.beginPath();ctx.arc(-b.r*0.2,-b.r*0.2,b.r*0.4,0,TAU);ctx.fill()
+  ctx.restore()
+
+  // Particles
+  for(const pt of state.particles){
+    const a=pt.life/pt.maxLife
+    ctx.globalAlpha=a
+    ctx.save()
+    ctx.translate(pt.x,pt.y);ctx.rotate(pt.rot)
+    ctx.fillStyle=pt.color;ctx.fillRect(-pt.w/2,-pt.h/2,pt.w,pt.h)
+    ctx.restore()
+  }
+  ctx.globalAlpha=1
+
+  // Score popups
+  for(const pop of state.scorePopups){
+    const a=pop.life/pop.maxLife
+    ctx.globalAlpha=a
+    ctx.fillStyle=pop.color
+    ctx.font=`bold ${pop.size}px Arial`;ctx.textAlign='center';ctx.textBaseline='middle'
+    ctx.fillText(pop.text,pop.x,pop.y+(1-a)*20)
+  }
+  ctx.globalAlpha=1
+
+  // HUD
+  ctx.fillStyle='#fff';ctx.font='18px Arial';ctx.textAlign='left';ctx.textBaseline='top'
+  ctx.fillText('Score: '+state.score,20,20)
+  ctx.fillStyle='#888';ctx.font='14px Arial'
+  ctx.fillText('Best: '+state.highScore,20,44)
+  ctx.fillStyle='#0cf';ctx.font='20px Arial';ctx.textAlign='center'
+  ctx.fillText('Level '+state.level,400,20)
+  ctx.textAlign='right'
+  if(state.lives>0){
+    ctx.fillStyle='#f44';ctx.font='20px Arial'
+    ctx.fillText('♥'.repeat(state.lives),780,20)
+  }
+  if(input.zPressed){
+    ctx.globalAlpha=0.8;ctx.fillStyle='#ff0';ctx.font='bold 16px Arial';ctx.textAlign='center'
+    ctx.fillText('⚡ BOOST x4',400,100);ctx.globalAlpha=1
+  }
+  if(state.combo>1){
+    const a=Math.min(1,0.5+state.combo/20),sz=16+Math.min(state.combo,10)*0.5
+    ctx.globalAlpha=a
+    ctx.fillStyle='#f80';ctx.font=`${sz}px Arial`
+    ctx.fillText('🔥 '+state.combo+'x',780,50)
+    ctx.globalAlpha=1
+  }
+  if(input.cPressed){
+    ctx.fillStyle='#0f0';ctx.font='bold 12px Arial';ctx.textAlign='right'
+    ctx.fillText('⚡ PADDLE x2',780,80)
+  }
+  let yo=100
+  for(const type in state.powerUpTimers){
+    const rem=state.powerUpTimers[type]
+    if(rem>0){
+      ctx.fillStyle='rgba(255,255,255,0.8)';ctx.font='12px Arial';ctx.textAlign='right'
+      ctx.fillText(type.charAt(0).toUpperCase()+type.slice(1)+' '+Math.ceil(rem)+'s',780,yo)
+      yo+=20
+    }
+  }
+
+  // Level select overlay
+  if(showLevelSelect){
+    ctx.fillStyle='rgba(0,0,0,0.85)';ctx.fillRect(0,0,W,H)
+    ctx.fillStyle='#fff';ctx.font='28px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
+    ctx.fillText('SELECT LEVEL',400,60)
+    for(let lv=1;lv<=12;lv++){
+      const col=(lv-1)%6,row=Math.floor((lv-1)/6)
+      const bx=220+col*65,by=H/2-40+row*55
+      ctx.fillStyle=lv===state.level?'#0f8':'#555'
+      roundRect(ctx,bx,by,55,40,6);ctx.fill()
+      if(lv===lsCursor){
+        ctx.strokeStyle='#fff';ctx.lineWidth=3
+        roundRect(ctx,bx-2,by-2,59,44,7);ctx.stroke()
+      }
+      ctx.fillStyle='#fff';ctx.font='bold 16px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
+      ctx.fillText(lv,bx+27,by+20)
+    }
+    ctx.fillStyle='#f44';ctx.font='16px Arial';ctx.textAlign='center'
+    roundRect(ctx,350,H/2+100,100,30,6);ctx.fill()
+    ctx.fillStyle='#fff';ctx.fillText('CLOSE',400,H/2+115)
+    ctx.fillStyle='rgba(255,255,255,0.3)';ctx.font='12px Arial'
+    ctx.fillText('↑↓←→ navigate   ENTER/SPACE select   ESC/CLOSE back',400,H/2+150)
+  }
+
+  if(!showLevelSelect){
+  // Overlays
+  if(state.status===GameStatus.Waiting){
+    ctx.textAlign='center'
+    const a=0.6+Math.sin(state.time*2)*0.2
+    ctx.globalAlpha=a
+    ctx.fillStyle='#fff';ctx.font='20px Arial'
+    ctx.fillText('Click or press SPACE to launch',400,H/2+40)
+    ctx.globalAlpha=1
+    ctx.strokeStyle='rgba(0,255,255,0.3)';ctx.setLineDash([5,5]);ctx.lineWidth=1
+    ctx.beginPath();ctx.moveTo(b.x,b.y);ctx.lineTo(b.x,p.y-50);ctx.stroke()
+    ctx.setLineDash([])
+    ctx.fillStyle='rgba(255,255,255,0.3)';ctx.font='12px Arial';ctx.textAlign='center'
+    ctx.fillStyle='#0f8';ctx.font='16px Arial';ctx.textAlign='center'
+    ctx.fillText('[ Level Select ]',400,H/2+75)
+    ctx.fillStyle='rgba(255,255,255,0.3)';ctx.font='12px Arial'
+    ctx.fillText('Ctrl+L to open anytime',400,H-8)
+  }
+
+  if(state.paused){
+    ctx.fillStyle='rgba(0,0,0,0.5)';ctx.fillRect(0,0,W,H)
+    ctx.fillStyle='#fff';ctx.font='48px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
+    ctx.fillText('PAUSED',400,H/2-90)
+    ctx.font='16px Arial';ctx.fillStyle='#88f'
+    ctx.fillText('ESC = resume / settings',400,H/2-50)
+    if(settings.showSettings){
+      const items=['Mouse sensitivity','Key sensitivity']
+      for(let i=0;i<2;i++){
+        const y=H/2+10+i*45,sel=i===settings.selected
+        ctx.textAlign='center';ctx.textBaseline='middle'
+        ctx.fillStyle=sel?'#ff0':'#aaa';ctx.font=sel?'bold 18px Arial':'16px Arial'
+        ctx.fillText(items[i],400,y)
+        ctx.fillStyle='#fff';ctx.font='16px Arial'
+        ctx.fillText(i===0?settings.mouseSensitivity.toFixed(1):settings.keySensitivity.toFixed(1),400,y+22)
+        ctx.fillStyle='#0f8';ctx.font='22px Arial'
+        ctx.fillText('◀',365,y+22);ctx.fillText('▶',435,y+22)
+      }
+      ctx.textAlign='center';ctx.fillStyle='#666';ctx.font='12px Arial';ctx.textBaseline='bottom'
+      ctx.fillText('↑↓ select   ← → adjust',400,H-30)
+    }else{
+      ctx.font='18px Arial';ctx.fillStyle='#88f';ctx.textAlign='center';ctx.textBaseline='middle'
+      ctx.fillText('[ Settings ]',400,H/2-10)
+      ctx.fillStyle='#0f8';ctx.font='16px Arial'
+      ctx.fillText('[ Level Select ]',400,H/2+25)
+      ctx.fillStyle='rgba(255,255,255,0.3)';ctx.font='12px Arial'
+      ctx.fillText('Click / S / ESC',400,H/2+50)
+    }
+  }
+
+  if(state.gameOver){
+    ctx.fillStyle='rgba(0,0,0,0.7)';ctx.fillRect(0,0,W,H)
+    ctx.fillStyle='#f44';ctx.font='56px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
+    ctx.fillText('GAME OVER',400,H/2-40)
+    ctx.fillStyle='#fff';ctx.font='28px Arial'
+    ctx.fillText('Score: '+state.score,400,H/2+30)
+    ctx.fillStyle='#88f';ctx.font='18px Arial'
+    ctx.fillText('Press SPACE to restart',400,H/2+70)
+  }
+
+  if(state.levelComplete){
+    ctx.fillStyle='rgba(0,0,0,0.4)';ctx.fillRect(0,0,W,H)
+    ctx.fillStyle='#0f8';ctx.font='40px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
+    ctx.fillText('LEVEL '+state.level+' COMPLETE!',400,H/2-40)
+    ctx.fillStyle='#fff';ctx.font='24px Arial'
+    ctx.fillText('Score: '+state.score,400,H/2+30)
+    ctx.fillStyle='#88f';ctx.font='18px Arial'
+    ctx.fillText('Click to continue',400,H/2+70)
+  }
+
+  } // end !showLevelSelect
+
+  // Flash effect
+  if(state.flashEffect){
+    const f=state.flashEffect
+    const a=f.intensity*(1-f.elapsed/f.duration)
+    ctx.globalAlpha=a
+    ctx.fillStyle=f.color;ctx.fillRect(0,0,W,H)
+    ctx.globalAlpha=1
+  }
+
+  ctx.restore()
+}
+
+function roundRect(ctx,x,y,w,h,r){
+  ctx.beginPath();ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y)
+  ctx.quadraticCurveTo(x+w,y,x+w,y+r)
+  ctx.lineTo(x+w,y+h-r)
+  ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h)
+  ctx.lineTo(x+r,y+h)
+  ctx.quadraticCurveTo(x,y+h,x,y+h-r)
+  ctx.lineTo(x,y+r)
+  ctx.quadraticCurveTo(x,y,x+r,y);ctx.closePath()
+}
+
+// ===== GAME LOOP =====
+let gameState=createInitialState()
+let lastTime=0,frames=0,fpsTime=0
+
+function gameLoop(timestamp){
+  const dt=Math.min((timestamp-lastTime)/1000,0.05)
+  lastTime=timestamp
+
+  // FPS counter
+  frames++
+  if(timestamp-fpsTime>=1000){fpsEl.textContent=frames;frames=0;fpsTime=timestamp}
+
+  // Input handling
+  gameState=handleInput(gameState)
+  input.spacePressed=false;input.rPressed=false;input.mousePressed=false;input.keys['Enter']=false
+
+  // Update
+  if(!gameState.paused&&!gameState.gameOver){
+    gameState.time+=dt
+    let s=gameState
+
+    // Update all balls
+    if(s.status===GameStatus.Playing){
+      const boost=input.zPressed?4:1
+      // Main ball
+      s.ball=updateBall(s.ball,dt,boost)
+      s.ball.trail.unshift({x:s.ball.x,y:s.ball.y})
+      if(s.ball.trail.length>20)s.ball.trail.pop()
+
+      // Extra balls
+      for(let i=s.balls.length-1;i>=0;i--){
+        s.balls[i]=updateBall(s.balls[i],dt,boost)
+        s.balls[i].trail.unshift({x:s.balls[i].x,y:s.balls[i].y})
+        if(s.balls[i].trail.length>20)s.balls[i].trail.pop()
+        if(s.balls[i].y>H+100)s.balls.splice(i,1)
+      }
+
+      s=handleWallCollision(s)
+
+      // Ball lost (main ball)
+      if(s.ball.y>H+100){
+        if(s.balls.length>0){
+          s.ball=s.balls.shift()
+        }else{
+          s.lives--
+          s.combo=0
+          if(s.lives<=0){s.gameOver=true;playSound('lose',0.7)}
+          else{resetBall(s);playSound('lose',0.5)}
+        }
+      }
+
+      // Paddle collision
+      s=handlePaddleCollision(s)
+      for(let i=s.balls.length-1;i>=0;i--){
+        const tmp=s.ball
+        s.ball=s.balls[i]
+        s=handlePaddleCollision(s)
+        s.balls[i]=s.ball
+        s.ball=tmp
+      }
+
+      // Brick collisions (main + extra)
+      s=handleBrickCollision(s)
+      for(let i=s.balls.length-1;i>=0;i--){
+        const tmp=s.ball
+        s.ball=s.balls[i]
+        s=handleBrickCollision(s)
+        s.balls[i]=s.ball
+        s.ball=tmp
+      }
+
+      // Level complete check
+      const alive=s.bricks.filter(b=>b.isAlive&&b.type!==BrickType.Indestructible)
+      if(alive.length===0){
+        s.levelComplete=true
+        s.status=GameStatus.LevelComplete
+        playSound('level_complete',0.6)
+      }
+    }
+
+    // Paddle
+    if(s.status===GameStatus.Waiting||s.status===GameStatus.Playing){
+      s.paddle=updatePaddle(s.paddle,input,dt)
+    }
+
+    // Power-ups falling
+    for(const pu of s.powerUps){
+      if(!pu.active)continue
+      pu.y+=pu.dy*dt
+      if(pu.y+pu.h>s.paddle.y&&pu.x>s.paddle.x&&pu.x<s.paddle.x+s.paddle.w){
+        s=applyPowerUp(s,pu);pu.active=false
+      }
+      if(pu.y>650)pu.active=false
+    }
+    s.powerUps=s.powerUps.filter(p=>p.active)
+
+    // Power-up timers
+    for(const type in s.powerUpTimers){
+      s.powerUpTimers[type]-=dt
+      if(s.powerUpTimers[type]<=0){
+        removePowerUpEffect(s,Number(type))
+        delete s.powerUpTimers[type]
+      }
+    }
+
+    // Particles
+    s.particles=updateParticles(s.particles,dt)
+    s.scorePopups=updateScorePopups(s.scorePopups,dt)
+    s.shakeIntensity=Math.max(0,s.shakeIntensity-dt*2)
+
+    // Flash effect
+    if(s.flashEffect){
+      s.flashEffect.elapsed+=dt
+      if(s.flashEffect.elapsed>=s.flashEffect.duration)s.flashEffect=null
+    }
+
+    // Lasers
+    for(const l of s.lasers){
+      if(!l.active)continue
+      l.y+=l.dy*dt
+      for(const brick of s.bricks){
+        if(!brick.isAlive)continue
+        if(rectCollision(
+          {x:l.x,y:l.y,w:l.w,h:l.h},
+          {x:brick.x,y:brick.y,w:brick.w,h:brick.h}
+        )){
+          brick.health--
+          if(brick.health<=0){
+            brick.isAlive=false
+            s.score+=brick.points
+            s.particles=s.particles.concat(createExplosionParticles(
+              brick.x+brick.w/2,brick.y+brick.h/2,brick.color,10
+            ))
+          }
+          l.active=false;break
+        }
+      }
+      if(l.y<0)l.active=false
+    }
+    s.lasers=s.lasers.filter(l=>l.active)
+
+    // High score
+    if(s.score>s.highScore){s.highScore=s.score;localStorage.setItem('breakout_high',String(s.highScore))}
+
+    // Magnet
+    if(s.magnetActive&&s.status===GameStatus.Waiting){
+      s.ball.x=s.paddle.x+s.paddle.w/2
+      s.ball.y=s.paddle.y-s.ball.r-5
+      s.ball.dx=0;s.ball.dy=0
+    }
+
+    gameState=s
+  }
+
+  input.mouseDeltaX=0
+  render(gameState)
+  requestAnimationFrame(gameLoop)
+}
+
+requestAnimationFrame(gameLoop)
+
+// Prevent context menu
+canvas.addEventListener('contextmenu',e=>e.preventDefault())
+</script>
+</body>
+</html>
