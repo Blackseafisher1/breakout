@@ -341,13 +341,16 @@ function launchBall(state){
 
 // ===== PADDLE =====
 function updatePaddle(paddle,input,dt){
-  const spd=paddle.speed*settings.keySensitivity*(input.cPressed?2:1)
+  const cBoost=input.cPressed||input.touchC
+  const spd=paddle.speed*settings.keySensitivity*(cBoost?2:1)
+  const lk=input.leftKeyPressed||input.touchLeft
+  const rk=input.rightKeyPressed||input.touchRight
 
-  if(input.touches.length>0){
+  if(input.touches.length>0&&!lk&&!rk){
     const t=input.touches[0]
     paddle.x+=clamp(t.x-paddle.w/2-paddle.x,-spd*dt,spd*dt)
-  }else if(input.leftKeyPressed||input.rightKeyPressed){
-    let mx=input.leftKeyPressed?-1:1
+  }else if(lk||rk){
+    let mx=lk?-1:1
     paddle.x+=mx*spd*dt
   }else if(input.mouseDeltaX!==0){
     paddle.x+=input.mouseDeltaX*settings.mouseSensitivity
@@ -458,7 +461,8 @@ let showLevelSelect=false,lsCursor=1
 const settings={mouseSensitivity:1,keySensitivity:1,showSettings:false,selected:0}
 const input={
   keys:{},touches:[],mouseX:0,mouseY:0,mouseDeltaX:0,lastMouseX:-1,mousePressed:false,
-  leftKeyPressed:false,rightKeyPressed:false,spacePressed:false,rPressed:false,zPressed:false,cPressed:false
+  leftKeyPressed:false,rightKeyPressed:false,spacePressed:false,rPressed:false,zPressed:false,cPressed:false,
+  touchLeft:false,touchRight:false,touchZ:false,touchC:false
 }
 
 document.addEventListener('keydown',e=>{
@@ -504,6 +508,18 @@ function handleSettingsInput(){
 
 function handleInput(state){
   const sp=input.spacePressed,ms=input.mousePressed||input.touches.length>0
+
+  // Mobile buttons + lock toggle
+  if(ms){
+    const mx=input.mouseX,my=input.mouseY
+    if(my>H-40&&my<H-5&&mx>350&&mx<450&&!showLevelSelect){mbLocked=!mbLocked}
+    else if(mbLocked&&!state.paused&&!showLevelSelect&&state.status!==GameStatus.GameOver&&state.status!==GameStatus.LevelComplete&&state.status!==GameStatus.Paused){
+      handleMobileButtons(ms,mx,my)
+    }else if(!mbLocked&&input.touches.length>0){
+      handleMobileButtons(ms,mx,my)
+    }
+  }
+  if(!mbLocked&&input.touches.length===0&&input.mousePressed===false)mbDrag=-1
 
   if(input.keys['CtrlL']){showLevelSelect=!showLevelSelect;input.keys['CtrlL']=false;if(showLevelSelect)state.paused=true}
 
@@ -608,6 +624,62 @@ function handleInput(state){
   return state
 }
 
+// ===== MOBILE BUTTONS =====
+let mbLocked=true
+const mbButtons=[
+  {id:'left',label:'◀',x:30,y:470,w:60,h:60,action:()=>{input.touchLeft=true}},
+  {id:'right',label:'▶',x:W-90,y:470,w:60,h:60,action:()=>{input.touchRight=true}},
+  {id:'boost',label:'⚡',x:W-90,y:390,w:60,h:60,action:()=>{input.touchZ=true}},
+  {id:'paddle',label:'C',x:30,y:390,w:60,h:60,action:()=>{input.touchC=true}}
+]
+let mbDrag=-1
+
+function handleMobileButtons(ms,mx,my){
+  if(!ms||input.touches.length===0)return
+  if(mbLocked){
+    for(let i=0;i<mbButtons.length;i++){
+      const b=mbButtons[i]
+      if(mx>b.x&&mx<b.x+b.w&&my>b.y&&my<b.y+b.h){
+        b.action();break
+      }
+    }
+    return
+  }
+  // Drag
+  if(mbDrag<0){
+    for(let i=mbButtons.length-1;i>=0;i--){
+      const b=mbButtons[i]
+      if(mx>b.x&&mx<b.x+b.w&&my>b.y&&my<b.y+b.h){mbDrag=i;break}
+    }
+  }
+  if(mbDrag>=0){
+    mbButtons[mbDrag].x=mx-30;mbButtons[mbDrag].y=my-30
+    mbButtons[mbDrag].x=clamp(mbButtons[mbDrag].x,0,W-60)
+    mbButtons[mbDrag].y=clamp(mbButtons[mbDrag].y,0,H-60)
+  }
+}
+
+function renderMobileButtons(ctx){
+  if(input.touches.length===0&&!input.mousePressed)return
+  ctx.globalAlpha=0.5
+  for(const b of mbButtons){
+    ctx.fillStyle='#333';roundRect(ctx,b.x,b.y,b.w,b.h,12);ctx.fill()
+    ctx.fillStyle='#fff';ctx.font='24px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
+    ctx.fillText(b.label,b.x+b.w/2,b.y+b.h/2)
+  }
+  if(!mbLocked&&mbDrag>=0){
+    ctx.strokeStyle='#ff0';ctx.lineWidth=2
+    const b=mbButtons[mbDrag]
+    roundRect(ctx,b.x-3,b.y-3,b.w+6,b.h+6,14);ctx.stroke()
+  }
+  ctx.globalAlpha=1
+  // Lock toggle button
+  ctx.fillStyle=mbLocked?'rgba(0,255,136,0.5)':'rgba(255,68,68,0.5)'
+  ctx.font='14px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
+  roundRect(ctx,350,H-35,100,28,6);ctx.fill()
+  ctx.fillStyle='#fff';ctx.fillText(mbLocked?'BUTTONS LOCKED':'DRAG TO MOVE',400,H-21)
+}
+
 // ===== CANVAS SETUP =====
 const canvas=document.getElementById('c')
 const ctx=canvas.getContext('2d')
@@ -621,6 +693,7 @@ canvas.addEventListener('touchstart',e=>{
   input.touches=Array.from(e.touches).map(t=>({
     id:t.identifier,x:(t.clientX-rect.left)*scaleX,y:(t.clientY-rect.top)*scaleY,isActive:true
   }))
+  input.mouseX=input.touches[0].x;input.mouseY=input.touches[0].y
   input.mousePressed=true
 })
 canvas.addEventListener('touchmove',e=>{
@@ -630,6 +703,7 @@ canvas.addEventListener('touchmove',e=>{
     const found=input.touches.find(tc=>tc.id===t.identifier)
     if(found){found.x=(t.clientX-rect.left)*scaleX;found.y=(t.clientY-rect.top)*scaleY}
   }
+  if(input.touches.length>0){input.mouseX=input.touches[0].x;input.mouseY=input.touches[0].y}
 })
 canvas.addEventListener('touchend',e=>{
   e.preventDefault()
@@ -798,7 +872,7 @@ function render(state){
     ctx.fillStyle='#f44';ctx.font='20px Arial'
     ctx.fillText('♥'.repeat(state.lives),780,20)
   }
-  if(input.zPressed){
+  if(input.zPressed||input.touchZ){
     ctx.globalAlpha=0.8;ctx.fillStyle='#ff0';ctx.font='bold 16px Arial';ctx.textAlign='center'
     ctx.fillText('⚡ BOOST x4',400,100);ctx.globalAlpha=1
   }
@@ -809,7 +883,7 @@ function render(state){
     ctx.fillText('🔥 '+state.combo+'x',780,50)
     ctx.globalAlpha=1
   }
-  if(input.cPressed){
+  if(input.cPressed||input.touchC){
     ctx.fillStyle='#0f0';ctx.font='bold 12px Arial';ctx.textAlign='right'
     ctx.fillText('⚡ PADDLE x2',780,80)
   }
@@ -927,6 +1001,7 @@ function render(state){
     ctx.globalAlpha=1
   }
 
+  renderMobileButtons(ctx)
   ctx.restore()
 }
 
@@ -956,6 +1031,7 @@ function gameLoop(timestamp){
   // Input handling
   gameState=handleInput(gameState)
   input.spacePressed=false;input.rPressed=false;input.mousePressed=false;input.keys['Enter']=false
+  input.touchLeft=false;input.touchRight=false;input.touchZ=false;input.touchC=false
 
   // Update
   if(!gameState.paused&&!gameState.gameOver){
@@ -964,7 +1040,7 @@ function gameLoop(timestamp){
 
     // Update all balls
     if(s.status===GameStatus.Playing){
-      const boost=input.zPressed?4:1
+      const boost=(input.zPressed||input.touchZ)?4:1
       // Main ball
       s.ball=updateBall(s.ball,dt,boost)
       s.ball.trail.unshift({x:s.ball.x,y:s.ball.y})
