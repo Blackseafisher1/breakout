@@ -13,7 +13,7 @@ canvas{display:block;border:1px solid #1a1a3a;border-radius:4px;max-width:100vw;
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="overlay" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:800px;height:600px;pointer-events:none;display:flex;justify-content:center;align-items:center;font-family:Arial,sans-serif">
+<div id="overlay" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:800px;height:600px;pointer-events:none;display:flex;justify-content:center;align-items:center;font-family:Arial,sans-serif;touch-action:none">
   <div id="gameover" style="display:none;pointer-events:auto;text-align:center">
     <div style="color:#f44;font-size:56px;margin-bottom:10px">GAME OVER</div>
     <div id="finalScore" style="color:#fff;font-size:28px;margin-bottom:15px"></div>
@@ -745,31 +745,32 @@ function updateOverlay(state){
   }
 }
 
-restartBtn.addEventListener('click',()=>{gameState=createInitialState();playSound('bounce',0.3)})
-restartBtn.addEventListener('touchend',e=>{e.preventDefault();gameState=createInitialState();playSound('bounce',0.3)})
-lsBtnWait.addEventListener('click',()=>{showLevelSelect=true})
-lsBtnWait.addEventListener('touchend',e=>{e.preventDefault();showLevelSelect=true})
-lsBtnPause.addEventListener('click',()=>{showLevelSelect=true})
-lsBtnPause.addEventListener('touchend',e=>{e.preventDefault();showLevelSelect=true})
-settingsBtn.addEventListener('click',()=>{settings.showSettings=true;spDiv.style.display='block';pauseDiv.style.display='none'})
-settingsBtn.addEventListener('touchend',e=>{e.preventDefault();settings.showSettings=true;spDiv.style.display='block';pauseDiv.style.display='none'})
-lsClose.addEventListener('click',()=>{showLevelSelect=false})
-lsClose.addEventListener('touchend',e=>{e.preventDefault();showLevelSelect=false})
-closeSettings.addEventListener('click',()=>{settings.showSettings=false;spDiv.style.display='none';pauseDiv.style.display='block'})
-closeSettings.addEventListener('touchend',e=>{e.preventDefault();settings.showSettings=false;spDiv.style.display='none';pauseDiv.style.display='block'})
+function doRestart(){gameState=createInitialState();playSound('bounce',0.3)}
+goDiv.addEventListener('touchstart',doRestart)
+waitDiv.addEventListener('touchstart',e=>{
+  if(e.target===lsBtnWait||lsBtnWait.contains(e.target))return
+  if(gameState.status===GameStatus.Waiting)gameState=launchBall(gameState)
+})
+waitDiv.addEventListener('click',e=>{
+  if(e.target===lsBtnWait||lsBtnWait.contains(e.target))return
+  if(gameState.status===GameStatus.Waiting)gameState=launchBall(gameState)
+})
+lsBtnWait.addEventListener('touchstart',e=>{e.stopPropagation();showLevelSelect=true})
+lsBtnPause.addEventListener('touchstart',()=>{showLevelSelect=true})
+settingsBtn.addEventListener('touchstart',()=>{settings.showSettings=true;spDiv.style.display='block';pauseDiv.style.display='none'})
+lsClose.addEventListener('touchstart',()=>{showLevelSelect=false})
+closeSettings.addEventListener('touchstart',()=>{settings.showSettings=false;spDiv.style.display='none';pauseDiv.style.display='block'})
 
 function updateSettingsDisplay(){
   mouseVal.textContent=settings.mouseSensitivity.toFixed(1)
   keyVal.textContent=settings.keySensitivity.toFixed(1)
 }
-msDown.addEventListener('click',()=>{settings.mouseSensitivity=clamp(+(settings.mouseSensitivity-0.2).toFixed(1),0.1,3);updateSettingsDisplay()})
-msUp.addEventListener('click',()=>{settings.mouseSensitivity=clamp(+(settings.mouseSensitivity+0.2).toFixed(1),0.1,3);updateSettingsDisplay()})
-ksDown.addEventListener('click',()=>{settings.keySensitivity=clamp(+(settings.keySensitivity-0.2).toFixed(1),0.1,3);updateSettingsDisplay()})
-ksUp.addEventListener('click',()=>{settings.keySensitivity=clamp(+(settings.keySensitivity+0.2).toFixed(1),0.1,3);updateSettingsDisplay()})
-msDown.addEventListener('touchend',e=>{e.preventDefault();settings.mouseSensitivity=clamp(+(settings.mouseSensitivity-0.2).toFixed(1),0.1,3);updateSettingsDisplay()})
-msUp.addEventListener('touchend',e=>{e.preventDefault();settings.mouseSensitivity=clamp(+(settings.mouseSensitivity+0.2).toFixed(1),0.1,3);updateSettingsDisplay()})
-ksDown.addEventListener('touchend',e=>{e.preventDefault();settings.keySensitivity=clamp(+(settings.keySensitivity-0.2).toFixed(1),0.1,3);updateSettingsDisplay()})
-ksUp.addEventListener('touchend',e=>{e.preventDefault();settings.keySensitivity=clamp(+(settings.keySensitivity+0.2).toFixed(1),0.1,3);updateSettingsDisplay()})
+function adjMouse(d){settings.mouseSensitivity=clamp(+(settings.mouseSensitivity+d).toFixed(1),0.1,3);updateSettingsDisplay()}
+function adjKey(d){settings.keySensitivity=clamp(+(settings.keySensitivity+d).toFixed(1),0.1,3);updateSettingsDisplay()}
+msDown.addEventListener('touchstart',e=>{e.preventDefault();adjMouse(-0.2)})
+msUp.addEventListener('touchstart',e=>{e.preventDefault();adjMouse(0.2)})
+ksDown.addEventListener('touchstart',e=>{e.preventDefault();adjKey(-0.2)})
+ksUp.addEventListener('touchstart',e=>{e.preventDefault();adjKey(0.2)})
 
 function buildLevelGrid(){
   lsGrid.innerHTML=''
@@ -777,8 +778,7 @@ function buildLevelGrid(){
     const btn=document.createElement('div')
     btn.textContent=lv
     Object.assign(btn.style,{background:'#555',color:'#fff',padding:'10px 0',borderRadius:'6px',cursor:'pointer',fontSize:'16px',textAlign:'center'})
-    btn.addEventListener('click',()=>{jumpToLevel(lv)})
-    btn.addEventListener('touchend',e=>{e.preventDefault();jumpToLevel(lv)})
+    btn.addEventListener('touchstart',e=>{e.preventDefault();jumpToLevel(lv)})
     lsGrid.appendChild(btn)
   }
 }
@@ -1006,89 +1006,16 @@ function render(state){
     }
   }
 
-  // Level select overlay
-  if(showLevelSelect){
-    ctx.fillStyle='rgba(0,0,0,0.85)';ctx.fillRect(0,0,W,H)
-    ctx.fillStyle='#fff';ctx.font='28px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
-    ctx.fillText('SELECT LEVEL',400,60)
-    for(let lv=1;lv<=12;lv++){
-      const col=(lv-1)%6,row=Math.floor((lv-1)/6)
-      const bx=220+col*65,by=H/2-40+row*55
-      ctx.fillStyle=lv===state.level?'#0f8':'#555'
-      roundRect(ctx,bx,by,55,40,6);ctx.fill()
-      if(lv===lsCursor){
-        ctx.strokeStyle='#fff';ctx.lineWidth=3
-        roundRect(ctx,bx-2,by-2,59,44,7);ctx.stroke()
-      }
-      ctx.fillStyle='#fff';ctx.font='bold 16px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
-      ctx.fillText(lv,bx+27,by+20)
-    }
-    ctx.fillStyle='#f44';ctx.font='16px Arial';ctx.textAlign='center'
-    roundRect(ctx,350,H/2+100,100,30,6);ctx.fill()
-    ctx.fillStyle='#fff';ctx.fillText('CLOSE',400,H/2+115)
-    ctx.fillStyle='rgba(255,255,255,0.3)';ctx.font='12px Arial'
-    ctx.fillText('↑↓←→ navigate   ENTER/SPACE select   ESC/CLOSE back',400,H/2+150)
-  }
-
-  if(!showLevelSelect){
-  // Overlays
-  if(state.status===GameStatus.Waiting){
-    ctx.textAlign='center'
-    const a=0.6+Math.sin(state.time*2)*0.2
-    ctx.globalAlpha=a
-    ctx.fillStyle='#fff';ctx.font='20px Arial'
-    ctx.fillText('Click or press SPACE to launch',400,H/2+40)
-    ctx.globalAlpha=1
+  // Waiting aim line + launch hint (visual only, HTML overlay handles clicks)
+  if(state.status===GameStatus.Waiting&&!showLevelSelect){
     ctx.strokeStyle='rgba(0,255,255,0.3)';ctx.setLineDash([5,5]);ctx.lineWidth=1
     ctx.beginPath();ctx.moveTo(b.x,b.y);ctx.lineTo(b.x,p.y-50);ctx.stroke()
     ctx.setLineDash([])
     ctx.fillStyle='rgba(255,255,255,0.3)';ctx.font='12px Arial';ctx.textAlign='center'
-    ctx.fillStyle='#0f8';ctx.font='16px Arial';ctx.textAlign='center'
-    ctx.fillText('[ Level Select ]',400,H/2+75)
-    ctx.fillStyle='rgba(255,255,255,0.3)';ctx.font='12px Arial'
     ctx.fillText('Ctrl+L to open anytime',400,H-8)
   }
 
-  if(state.paused){
-    ctx.fillStyle='rgba(0,0,0,0.5)';ctx.fillRect(0,0,W,H)
-    ctx.fillStyle='#fff';ctx.font='48px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
-    ctx.fillText('PAUSED',400,H/2-90)
-    ctx.font='16px Arial';ctx.fillStyle='#88f'
-    ctx.fillText('ESC = resume / settings',400,H/2-50)
-    if(settings.showSettings){
-      const items=['Mouse sensitivity','Key sensitivity']
-      for(let i=0;i<2;i++){
-        const y=H/2+10+i*45,sel=i===settings.selected
-        ctx.textAlign='center';ctx.textBaseline='middle'
-        ctx.fillStyle=sel?'#ff0':'#aaa';ctx.font=sel?'bold 18px Arial':'16px Arial'
-        ctx.fillText(items[i],400,y)
-        ctx.fillStyle='#fff';ctx.font='16px Arial'
-        ctx.fillText(i===0?settings.mouseSensitivity.toFixed(1):settings.keySensitivity.toFixed(1),400,y+22)
-        ctx.fillStyle='#0f8';ctx.font='22px Arial'
-        ctx.fillText('◀',365,y+22);ctx.fillText('▶',435,y+22)
-      }
-      ctx.textAlign='center';ctx.fillStyle='#666';ctx.font='12px Arial';ctx.textBaseline='bottom'
-      ctx.fillText('↑↓ select   ← → adjust',400,H-30)
-    }else{
-      ctx.font='18px Arial';ctx.fillStyle='#88f';ctx.textAlign='center';ctx.textBaseline='middle'
-      ctx.fillText('[ Settings ]',400,H/2-10)
-      ctx.fillStyle='#0f8';ctx.font='16px Arial'
-      ctx.fillText('[ Level Select ]',400,H/2+25)
-      ctx.fillStyle='rgba(255,255,255,0.3)';ctx.font='12px Arial'
-      ctx.fillText('Click / S / ESC',400,H/2+50)
-    }
-  }
-
-  if(state.gameOver){
-    ctx.fillStyle='rgba(0,0,0,0.7)';ctx.fillRect(0,0,W,H)
-    ctx.fillStyle='#f44';ctx.font='56px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
-    ctx.fillText('GAME OVER',400,H/2-40)
-    ctx.fillStyle='#fff';ctx.font='28px Arial'
-    ctx.fillText('Score: '+state.score,400,H/2+30)
-    ctx.fillStyle='#88f';ctx.font='18px Arial'
-    ctx.fillText('Tap or press SPACE to restart',400,H/2+70)
-  }
-
+  // Level complete (keep canvas since no HTML overlay yet)
   if(state.levelComplete){
     ctx.fillStyle='rgba(0,0,0,0.4)';ctx.fillRect(0,0,W,H)
     ctx.fillStyle='#0f8';ctx.font='40px Arial';ctx.textAlign='center';ctx.textBaseline='middle'
@@ -1098,8 +1025,6 @@ function render(state){
     ctx.fillStyle='#88f';ctx.font='18px Arial'
     ctx.fillText('Click to continue',400,H/2+70)
   }
-
-  } // end !showLevelSelect
 
   // Flash effect
   if(state.flashEffect){
